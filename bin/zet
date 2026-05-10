@@ -1,0 +1,379 @@
+#!/bin/bash
+# Zet — knowledge system framework CLI
+# Usage: zet <command> [options]
+#
+# Commands:
+#   generate    Build skills/agents/rules from templates
+#   test        Run test suite
+#   scan        Detect dead code and drift
+#   validate    Check template structure and frontmatter
+#   init        Scaffold a new harness project
+#   doctor      Full health check (validate + scan + test)
+#   new         Create a new template (skill, agent, or rule)
+#   version     Show version
+#
+# Environment:
+#   ZET_ROOT    Project root (default: current directory)
+
+set -e
+
+VERSION="0.1.0"
+
+# Resolve ZET install location (follow symlinks — needed for npm/npx which
+# creates a relative symlink in node_modules/.bin/ → ../package/bin/zet)
+SELF="$0"
+if [ -L "$SELF" ]; then
+    LINK_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+    SELF="$LINK_DIR/$(readlink "$SELF")"
+fi
+ZET_BIN="$(cd "$(dirname "$SELF")" && pwd)"
+ZET_HOME="$(cd "$ZET_BIN/.." && pwd)"
+ZET_CORE="$ZET_HOME/core"
+
+# Project root
+export ZET_ROOT="${ZET_ROOT:-$(pwd)}"
+
+usage() {
+    echo "Zet v$VERSION — knowledge system framework"
+    echo ""
+    echo "Usage: zet <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  generate    Build skills/agents/rules from templates"
+    echo "  test        Run test suite"
+    echo "  scan        Detect dead code and drift"
+    echo "  validate    Check template frontmatter and structure"
+    echo "  init        Scaffold a new harness project"
+    echo "  coverage    Report test and documentation coverage"
+    echo "  doctor      Full health check (validate + scan + test)"
+    echo "  new <type> <name>  Create a new template"
+    echo "  version     Show version"
+    echo ""
+    echo "Run 'zet <command> --help' for command-specific help."
+}
+
+cmd_version() {
+    echo "zet $VERSION"
+}
+
+cmd_generate() {
+    # Check for project-specific override in zet.toml [commands] section
+    source "$ZET_CORE/config.sh"
+    zet_config_init "$ZET_ROOT"
+    local custom_cmd
+    custom_cmd=$(zet_config_get "commands" "generate" "")
+    if [ -n "$custom_cmd" ]; then
+        eval "$custom_cmd" "$@"
+    else
+        bash "$ZET_CORE/generator.sh" "$@"
+    fi
+}
+
+cmd_scan() {
+    source "$ZET_CORE/config.sh"
+    zet_config_init "$ZET_ROOT"
+    local custom_cmd
+    custom_cmd=$(zet_config_get "commands" "scan" "")
+    if [ -n "$custom_cmd" ]; then
+        eval "$custom_cmd" "$@"
+    else
+        bash "$ZET_CORE/scanner.sh" "$@"
+    fi
+}
+
+cmd_coverage() {
+    bash "$ZET_CORE/coverage.sh" "$@"
+}
+
+cmd_test() {
+    source "$ZET_CORE/config.sh"
+    zet_config_init "$ZET_ROOT"
+    local test_dir
+    test_dir=$(zet_config_get "paths" "tests" "$ZET_ROOT/tests")
+    if [ ! -d "$test_dir" ]; then
+        echo "No tests/ directory found in $ZET_ROOT" >&2
+        exit 1
+    fi
+
+    local total=0 passed=0 failed=0
+    for test_file in "$test_dir"/test-*.sh; do
+        [ -f "$test_file" ] || continue
+        echo "--- $(basename "$test_file") ---"
+        total=$((total + 1))
+        if bash "$test_file"; then
+            passed=$((passed + 1))
+        else
+            failed=$((failed + 1))
+        fi
+        echo ""
+    done
+
+    echo "=== Test Suites: $total | Passed: $passed | Failed: $failed ==="
+    [ "$failed" -gt 0 ] && exit 1
+    exit 0
+}
+
+cmd_validate() {
+    local template_dir="${ZET_TEMPLATES:-$ZET_ROOT/templates}"
+    local errors=0
+
+    if [ ! -d "$template_dir" ]; then
+        echo "ERROR: template directory not found: $template_dir" >&2
+        exit 1
+    fi
+
+    echo "=== Zet Validate ==="
+    echo "Checking: $template_dir"
+    echo ""
+
+    for file in "$template_dir"/*_prompt_template.md; do
+        [ -f "$file" ] || continue
+        local filename
+        filename=$(basename "$file")
+        local name
+        name="${filename%_prompt_template.md}"
+
+        # Check type: field exists
+        local type
+        type=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^type:/{sub(/^type: */,"");print;exit}' "$file")
+        if [ -z "$type" ]; then
+            echo "  ERROR: $filename — missing type: field"
+            errors=$((errors + 1))
+            continue
+        fi
+
+        # Check type is valid enum
+        case "$type" in
+            skill|agent|rule) ;;
+            *)
+                echo "  ERROR: $filename — invalid type: '$type' (must be skill, agent, or rule)"
+                errors=$((errors + 1))
+                continue
+                ;;
+        esac
+
+        # Skills must have description
+        if [ "$type" = "skill" ]; then
+            local desc
+            desc=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^description:/{sub(/^description: *"?/,"");sub(/"$/,"");print;exit}' "$file")
+            if [ -z "$desc" ]; then
+                echo "  ERROR: $filename — skill missing description: field"
+                errors=$((errors + 1))
+            fi
+        fi
+
+        # Rules must have paths or global
+        if [ "$type" = "rule" ]; then
+            if ! grep -q "^paths:" "$file" && ! grep -q "^global: true" "$file"; then
+                echo "  WARNING: $filename — rule has neither paths: nor global: true"
+            fi
+        fi
+    done
+
+    if [ "$errors" -eq 0 ]; then
+        echo "  All templates valid."
+    else
+        echo ""
+        echo "  $errors error(s) found."
+        exit 1
+    fi
+}
+
+cmd_init() {
+    local target="${1:-$ZET_ROOT}"
+
+    if [ -f "$target/zet.toml" ]; then
+        echo "Already initialized: $target/zet.toml exists" >&2
+        exit 1
+    fi
+
+    echo "=== Zet Init ==="
+    echo "Creating harness in: $target"
+
+    mkdir -p "$target"/{templates,hooks,tests}
+
+    # zet.toml
+    cat > "$target/zet.toml" <<'EOF'
+# Zet configuration
+# Docs: https://github.com/xinyun2020/zet
+
+[project]
+name = "my-harness"
+version = "0.1.0"
+
+[paths]
+templates = "templates/"
+skills = "~/.claude/skills/"
+agents = "~/.claude/agents/"
+rules = "~/.claude/rules/"
+hooks = "hooks/"
+tests = "tests/"
+
+[model-roles]
+audit = "haiku"
+execute = "sonnet"
+think = "opus"
+EOF
+
+    # Example template
+    cat > "$target/templates/hello_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Example skill — replace with your own
+---
+# Hello
+
+This is an example skill template. Edit this file or create new templates.
+
+Run `zet generate` to build your harness.
+EOF
+
+    # model-roles.conf
+    cat > "$target/model-roles.conf" <<'EOF'
+# Model role assignments
+# Roles: audit (fast/cheap), execute (default), think (deep reasoning)
+audit=haiku
+execute=sonnet
+think=opus
+EOF
+
+    echo ""
+    echo "Created:"
+    echo "  zet.toml              — project configuration"
+    echo "  templates/            — your prompt templates go here"
+    echo "  hooks/                — hook scripts"
+    echo "  tests/                — test suites"
+    echo "  model-roles.conf      — model role aliases"
+    echo ""
+    echo "Next: edit templates/, then run 'zet generate'"
+}
+
+cmd_new() {
+    local type="${1:-}"
+    local name="${2:-}"
+
+    if [ -z "$type" ] || [ -z "$name" ]; then
+        echo "Usage: zet new <skill|agent|rule> <name>" >&2
+        exit 1
+    fi
+
+    case "$type" in
+        skill|agent|rule) ;;
+        *) echo "ERROR: type must be skill, agent, or rule" >&2; exit 1 ;;
+    esac
+
+    local template_dir="${ZET_TEMPLATES:-$ZET_ROOT/templates}"
+    local target="$template_dir/${name}_prompt_template.md"
+
+    if [ -f "$target" ]; then
+        echo "ERROR: $target already exists" >&2
+        exit 1
+    fi
+
+    mkdir -p "$template_dir"
+
+    case "$type" in
+        skill)
+            cat > "$target" <<EOF
+---
+type: skill
+description: TODO — describe what this skill does
+---
+# ${name}
+
+Instructions for the ${name} skill.
+EOF
+            ;;
+        agent)
+            cat > "$target" <<EOF
+---
+type: agent
+description: TODO — describe this agent's role
+model: sonnet
+---
+# ${name}
+
+You are the ${name} agent.
+EOF
+            ;;
+        rule)
+            cat > "$target" <<EOF
+---
+type: rule
+paths:
+  - "**/*.md"
+---
+# ${name}
+
+Rules that apply when editing matching files.
+EOF
+            ;;
+    esac
+
+    echo "Created: $target"
+}
+
+cmd_doctor() {
+    source "$ZET_CORE/config.sh"
+    zet_config_init "$ZET_ROOT"
+    local custom_cmd
+    custom_cmd=$(zet_config_get "commands" "doctor" "")
+    if [ -n "$custom_cmd" ]; then
+        eval "$custom_cmd" "$@"
+    else
+        bash "$ZET_CORE/doctor.sh" "$@"
+    fi
+}
+
+cmd_healthcheck() {
+    echo "=== Zet Health Check ==="
+    echo ""
+    local failed=0
+
+    echo "1/4 Validate"
+    if cmd_validate; then :; else failed=1; fi
+    echo ""
+
+    echo "2/4 Scan"
+    if cmd_scan; then :; else failed=1; fi
+    echo ""
+
+    echo "3/4 Doctor"
+    if cmd_doctor --quiet; then :; else failed=1; fi
+    echo ""
+
+    echo "4/4 Test"
+    if cmd_test; then :; else failed=1; fi
+
+    echo ""
+    if [ "$failed" -eq 0 ]; then
+        echo "Health check: all green."
+    else
+        echo "Health check: issues found — review above."
+        exit 1
+    fi
+}
+
+# --- Dispatch ---
+# Update all entry points together: usage(), dispatch case, help text
+COMMAND="${1:-}"
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+    generate)     cmd_generate "$@" ;;
+    test)         cmd_test "$@" ;;
+    scan)         cmd_scan "$@" ;;
+    coverage)     cmd_coverage "$@" ;;
+    validate)     cmd_validate "$@" ;;
+    init)         cmd_init "$@" ;;
+    new)          cmd_new "$@" ;;
+    doctor)       cmd_doctor "$@" ;;
+    healthcheck)  cmd_healthcheck "$@" ;;
+    version|-v|--version) cmd_version ;;
+    help|-h|--help|"") usage ;;
+    *)
+        echo "Unknown command: $COMMAND" >&2
+        echo "Run 'zet --help' for usage." >&2
+        exit 1
+        ;;
+esac

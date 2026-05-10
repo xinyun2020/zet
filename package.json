@@ -1,0 +1,33 @@
+{
+  "name": "@xinyun2020/zet",
+  "version": "0.1.0",
+  "description": "The framework for natural language as code",
+  "bin": {
+    "zet": "bin/zet"
+  },
+  "files": [
+    "bin/",
+    "core/",
+    "hooks/",
+    "install.sh",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "claude-code",
+    "ai-skills",
+    "prompt-templates",
+    "knowledge-system",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xinyun2020/zet.git"
+  },
+  "license": "MIT",
+  "author": "Xinyun Zhang",
+  "os": ["darwin", "linux"],
+  "engines": {
+    "node": ">=16"
+  }
+}
