@@ -40,7 +40,10 @@ npm install -g @xinyun2020/zet
 zet init
 zet generate
 
-# Option 3: curl install (no Node required)
+# Option 3: Homebrew (macOS)
+brew tap xinyun2020/tap && brew install zet
+
+# Option 4: curl install (no Node required)
 curl -fsSL https://raw.githubusercontent.com/xinyun2020/zet/main/install.sh | bash
 ```
 
@@ -80,15 +83,39 @@ version = "0.1.0"
 
 [paths]
 templates = "templates/"
-skills = "skills/"
-agents = "agents/"
-rules = "rules/"
+skills = "~/.claude/skills/"
+agents = "~/.claude/agents/"
+rules = "~/.claude/rules/"
+
+# Optional: generate Agent Skills Open Standard output for cross-tool interop
+# agents-std = ".agents/skills/"
 
 [model-roles]
 audit = "haiku"
 execute = "sonnet"
 think = "opus"
 ```
+
+### Multi-tool output (Codex, Cursor, Gemini CLI, etc.)
+
+Zet generates Claude Code config by default. To also output the [Agent Skills Open Standard](https://agentskills.io) format (read by 30+ tools including Codex CLI, Cursor, Gemini CLI, Kiro, and Windsurf), add `agents-std` to your paths:
+
+```toml
+[paths]
+templates = "templates/"
+skills = "~/.claude/skills/"
+agents-std = ".agents/skills/"   # interop output (gitignored or committed — your choice)
+```
+
+Then run `zet generate` as normal. Skills are written to BOTH locations from the same templates — single source of truth, multiple consumers.
+
+You can also set it via environment variable for one-off runs:
+
+```bash
+ZET_AGENTS_STD=".agents/skills/" zet generate
+```
+
+The interop output uses the same SKILL.md format (YAML frontmatter + markdown body) that Claude Code uses. No translation, no lossy conversion — the format IS the standard.
 
 ## Template Types
 
