@@ -40,6 +40,7 @@ usage() {
     echo ""
     echo "Commands:"
     echo "  generate    Build skills/agents/rules from templates"
+    echo "  status      One-line health summary (counts + staleness)"
     echo "  test        Run test suite"
     echo "  scan        Detect dead code and drift"
     echo "  validate    Check template frontmatter and structure"
@@ -114,6 +115,7 @@ cmd_test() {
 }
 
 cmd_validate() {
+    source "$ZET_CORE/frontmatter.sh"
     local template_dir="${ZET_TEMPLATES:-$ZET_ROOT/templates}"
     local errors=0
 
@@ -130,19 +132,15 @@ cmd_validate() {
         [ -f "$file" ] || continue
         local filename
         filename=$(basename "$file")
-        local name
-        name="${filename%_prompt_template.md}"
 
-        # Check type: field exists
         local type
-        type=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^type:/{sub(/^type: */,"");print;exit}' "$file")
+        type=$(get_template_type "$file")
         if [ -z "$type" ]; then
             echo "  ERROR: $filename — missing type: field"
             errors=$((errors + 1))
             continue
         fi
 
-        # Check type is valid enum
         case "$type" in
             skill|agent|rule) ;;
             *)
@@ -152,17 +150,15 @@ cmd_validate() {
                 ;;
         esac
 
-        # Skills must have description
         if [ "$type" = "skill" ]; then
             local desc
-            desc=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^description:/{sub(/^description: *"?/,"");sub(/"$/,"");print;exit}' "$file")
+            desc=$(get_frontmatter_value "$file" "description")
             if [ -z "$desc" ]; then
                 echo "  ERROR: $filename — skill missing description: field"
                 errors=$((errors + 1))
             fi
         fi
 
-        # Rules must have paths or global
         if [ "$type" = "rule" ]; then
             if ! grep -q "^paths:" "$file" && ! grep -q "^global: true" "$file"; then
                 echo "  WARNING: $filename — rule has neither paths: nor global: true"
@@ -208,6 +204,9 @@ agents = "~/.claude/agents/"
 rules = "~/.claude/rules/"
 hooks = "hooks/"
 tests = "tests/"
+# Uncomment to also generate Agent Skills Open Standard output (interop with
+# Codex CLI, Cursor, Gemini CLI, and 30+ other tools that read this format).
+# agents-std = ".agents/skills/"
 
 [model-roles]
 audit = "haiku"
@@ -313,6 +312,71 @@ EOF
     echo "Created: $target"
 }
 
+cmd_status() {
+    # One-line health summary: counts, staleness, last generate time
+    source "$ZET_CORE/config.sh"
+    source "$ZET_CORE/frontmatter.sh"
+    zet_config_init "$ZET_ROOT"
+
+    local template_dir
+    template_dir="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templates" "$ZET_ROOT/templates")}")"
+    local skills_dir
+    skills_dir="$(resolve_path "${ZET_SKILLS:-$(zet_config_get "paths" "skills" "$HOME/.claude/skills")}")"
+
+    local skill_count=0 agent_count=0 rule_count=0
+    local newest_template=0
+
+    if [ -d "$template_dir" ]; then
+        for file in "$template_dir"/*_prompt_template.md; do
+            [ -f "$file" ] || continue
+            local type
+            type=$(get_template_type "$file")
+            case "$type" in
+                skill) skill_count=$((skill_count + 1)) ;;
+                agent) agent_count=$((agent_count + 1)) ;;
+                rule)  rule_count=$((rule_count + 1)) ;;
+            esac
+            local mtime
+            mtime=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)
+            [ "$mtime" -gt "$newest_template" ] && newest_template=$mtime
+        done
+    fi
+
+    # Find last generate time from newest SKILL.md in output dir
+    local last_gen=0
+    if [ -d "$skills_dir" ]; then
+        for skill_md in "$skills_dir"/*/SKILL.md; do
+            [ -f "$skill_md" ] || continue
+            local mtime
+            mtime=$(stat -f %m "$skill_md" 2>/dev/null || stat -c %Y "$skill_md" 2>/dev/null || echo 0)
+            [ "$mtime" -gt "$last_gen" ] && last_gen=$mtime
+        done
+    fi
+
+    # Staleness check
+    local stale=""
+    if [ "$newest_template" -gt "$last_gen" ] && [ "$last_gen" -gt 0 ]; then
+        stale=" STALE"
+    elif [ "$last_gen" -eq 0 ]; then
+        stale=" NO-OUTPUT"
+    fi
+
+    # Format timestamps
+    local gen_date="never"
+    [ "$last_gen" -gt 0 ] && gen_date=$(date -r "$last_gen" "+%Y-%m-%d %H:%M" 2>/dev/null || date -d "@$last_gen" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+
+    local total=$((skill_count + agent_count + rule_count))
+
+    if [ "${1:-}" = "--json" ]; then
+        printf '{"total":%d,"skills":%d,"agents":%d,"rules":%d,"last_generate":"%s","stale":%s}\n' \
+            "$total" "$skill_count" "$agent_count" "$rule_count" "$gen_date" \
+            "$([ -n "$stale" ] && echo "true" || echo "false")"
+    else
+        printf "zet: %d templates (%d skill, %d agent, %d rule) | gen: %s%s\n" \
+            "$total" "$skill_count" "$agent_count" "$rule_count" "$gen_date" "$stale"
+    fi
+}
+
 cmd_doctor() {
     source "$ZET_CORE/config.sh"
     zet_config_init "$ZET_ROOT"
@@ -361,6 +425,7 @@ shift 2>/dev/null || true
 
 case "$COMMAND" in
     generate)     cmd_generate "$@" ;;
+    status)       cmd_status "$@" ;;
     test)         cmd_test "$@" ;;
     scan)         cmd_scan "$@" ;;
     coverage)     cmd_coverage "$@" ;;

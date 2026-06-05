@@ -117,53 +117,13 @@ ZET_AGENTS_STD=".agents/skills/" zet generate
 
 The interop output uses the same SKILL.md format (YAML frontmatter + markdown body) that Claude Code uses. No translation, no lossy conversion — the format IS the standard.
 
-## Template Types
+## Documentation
 
-Templates are markdown files with YAML frontmatter — the source of truth for your entire AI config:
-
-```yaml
----
-type: skill
-description: "Review code for security vulnerabilities"
-role: execute
----
-Your prompt content here...
-```
-
-```yaml
----
-type: agent
-role: think
-context: fork
----
-```
-
-```yaml
----
-type: rule
-paths:
-  - "src/**/*.ts"
----
-```
-
-## Core Concepts
-
-| Concept | What it does | Analogy |
-|---------|-------------|---------|
-| Template | Source of truth for a skill, agent, or rule | `.ts` source file |
-| Generator | Transforms templates into deployed config | `tsc` / webpack |
-| Scanner | Finds dead code, orphaned files, drift | `knip` / dead code detector |
-| Doctor | Health checks across the whole harness | `eslint --fix` |
-| Hooks | Enforce constraints mechanically | git hooks / husky |
-| `zet.toml` | Project configuration | `package.json` |
-
-## Philosophy
-
-- Extract from working systems, don't invent from scratch
-- Convention over configuration
-- Progressive disclosure — start with one template, grow into a full harness
-- Zero external dependencies (bash + standard unix tools)
-- Zet manages itself with Zet
+- [Concept](docs/concept.md) — why AI config needs engineering rigor
+- [Primitives](docs/primitives.md) — the four building blocks (template, hook, generator, scanner)
+- [Lifecycle](docs/lifecycle.md) — create → validate → generate → test → scan → improve
+- [Template Spec](docs/template-spec.md) — full frontmatter reference and naming conventions
+- [Examples](examples/) — real templates you can copy and use immediately
 
 ## Upgrade
 
