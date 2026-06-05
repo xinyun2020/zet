@@ -253,4 +253,103 @@ assert_not_contains_str "$output" "/home/" "no hardcoded home paths in output"
 assert_not_contains_str "$output" "CHANGEME" "no placeholder tokens in output"
 teardown
 
+# Test 14: Token bomb detection — unbounded fan-out in loop
+echo ""
+echo "--- Token bomb: unbounded fan-out ---"
+setup
+export HOME="$TEST_HOME"
+cat > "$ZET_TEMPLATES/dangerous_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Dangerous unbounded fan-out
+---
+# Dangerous Skill
+
+For each file in the repository, launch an Agent tool to review it.
+Iterate over all items and spawn a subagent for processing.
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" "dangerous_prompt_template.md" "detects unbounded Agent fan-out"
+assert_contains_str "$output" "HIGH" "rates unbounded fan-out as HIGH"
+teardown
+
+# Test 15: Token bomb — bounded fan-out is safe
+echo ""
+echo "--- Token bomb: bounded fan-out (safe) ---"
+setup
+export HOME="$TEST_HOME"
+cat > "$ZET_TEMPLATES/safe_fanout_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Safe bounded fan-out
+---
+# Safe Skill
+
+For each file, launch an Agent tool to review it.
+Maximum 5 agents. Stop after 5 iterations.
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" '"token_bombs": []' "bounded fan-out not flagged"
+teardown
+
+# Test 16: Token bomb — no fan-out at all is safe
+echo ""
+echo "--- Token bomb: no fan-out (safe) ---"
+setup
+export HOME="$TEST_HOME"
+cat > "$ZET_TEMPLATES/normal_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Normal skill with no agents
+---
+# Normal Skill
+
+Just do the thing. No agents involved.
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" '"token_bombs": []' "no-agent template not flagged"
+teardown
+
+# Test 17: Token bomb — "loop" in prose without iteration context is safe
+echo ""
+echo "--- Token bomb: bare loop word (safe) ---"
+setup
+export HOME="$TEST_HOME"
+cat > "$ZET_TEMPLATES/loopy_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Mentions loop but no iteration
+---
+# Feedback Loop Skill
+
+Use the Agent tool to run a feedback loop.
+The event loop handles this pattern well.
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" '"token_bombs": []' "bare loop word not flagged as token bomb"
+teardown
+
+# Test 18: Token bomb — body with --- (horizontal rule) parsed correctly
+echo ""
+echo "--- Token bomb: body with --- separator ---"
+setup
+export HOME="$TEST_HOME"
+cat > "$ZET_TEMPLATES/separator_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Has separator in body
+---
+# Intro
+
+Some text above.
+
+---
+
+For each item, launch an Agent tool to process it.
+Iterate through all results with a subagent.
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" "separator_prompt_template.md" "detects fan-out after --- in body"
+teardown
+
 zet_test_results

@@ -1,7 +1,28 @@
 #!/bin/bash
 # Zet Doctor — validate config health and detect common problems
-# Usage: doctor.sh [--json] [--quiet]
-# Dependencies: bash, grep, find
+#
+# Purpose:
+#   Static analysis health checker for AI agent harness configurations.
+#   Detects broken references, stale paths, leaked secrets, unbounded
+#   agent fan-out (token bombs), and configuration drift — all without
+#   invoking any LLM. Run after editing templates or as a CI gate.
+#
+# Usage:
+#   doctor.sh [--json] [--quiet]
+#
+# Options:
+#   --json    Output findings as structured JSON (for CI integration)
+#   --quiet   Suppress human-readable output (exit code only)
+#
+# Exit codes:
+#   0 — healthy, no issues
+#   1 — one or more issues detected
+#
+# Dependencies: bash, grep, find, sed, awk, python3 (for JSON output)
+#
+# Environment / zet.toml config:
+#   ZET_ROOT, ZET_TEMPLATES, ZET_SKILLS, ZET_AGENTS, ZET_RULES,
+#   ZET_MODEL_ROLES, ZET_INSTRUCTION_FILES
 #
 # Checks:
 #   1. Broken symlinks in output dirs (skills, agents, rules)
@@ -11,6 +32,8 @@
 #   5. Template description completeness
 #   6. Model-roles staleness (roles referenced but not defined)
 #   7. Secret detection (API keys, tokens in templates)
+#   8. Codex health (if ~/.codex/ exists)
+#   9. Token bomb detection (unbounded Agent fan-out in templates)
 #
 # Configuration via environment or zet.toml:
 #   ZET_ROOT, ZET_TEMPLATES, ZET_SKILLS, ZET_AGENTS, ZET_RULES
@@ -164,6 +187,45 @@ if [ -d "$TEMPLATE_DIR" ]; then
 fi
 
 # --- 8. Codex health (if ~/.codex/ exists) ---
+# --- 9. Token bomb detection (unbounded Agent fan-out) ---
+# Catches templates that spawn Agent subagents in loops without explicit caps.
+# Only flags HIGH (loop context + fan-out + no numeric bound). No MEDIUM noise.
+declare -a TOKEN_BOMBS=()
+if [ -d "$TEMPLATE_DIR" ]; then
+    # Patterns indicating Agent/subagent fan-out
+    FANOUT_PATTERNS='[Aa]gent tool|subagent|launch.*agent|spawn.*agent|fan.?out|parallel.*agent'
+    # Patterns indicating loop/iteration context (no bare "loop" — too many false positives)
+    LOOP_PATTERNS='for each|for every|iterate over|iterate through|all files|every file|each item|every item|repeat for|loop over|loop through'
+    # Patterns indicating bounds/caps (safe) — require numeric anchor
+    BOUND_PATTERNS='max [0-9]|limit [0-9]|at most [0-9]|cap.*[0-9]|maximum.*[0-9]|no more than [0-9]|stop after [0-9]|max_turns|turn.?cap'
+
+    for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
+        [ -f "$file" ] || continue
+        filename=$(basename "$file")
+        # Get body after frontmatter — counts exactly 2 --- delimiters, prints everything after
+        body=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2{print}' "$file")
+        [ -z "$body" ] && continue
+
+        # Check if template has fan-out patterns
+        has_fanout=$(echo "$body" | grep -ciE "$FANOUT_PATTERNS" || true)
+        has_fanout=${has_fanout:-0}
+        [ "$has_fanout" -eq 0 ] && continue
+
+        # Check if fan-out is in loop context
+        has_loop=$(echo "$body" | grep -ciE "$LOOP_PATTERNS" || true)
+        has_loop=${has_loop:-0}
+
+        # Only flag when loop + fan-out + no bounds (HIGH confidence)
+        if [ "$has_loop" -gt 0 ]; then
+            has_bounds=$(echo "$body" | grep -ciE "$BOUND_PATTERNS" || true)
+            has_bounds=${has_bounds:-0}
+            if [ "$has_bounds" -eq 0 ]; then
+                TOKEN_BOMBS+=("$filename:HIGH unbounded Agent fan-out in loop (no cap/limit found)")
+            fi
+        fi
+    done
+fi
+
 declare -a CODEX_ISSUES=()
 CODEX_DIR="$HOME/.codex"
 if [ -d "$CODEX_DIR" ]; then
@@ -203,7 +265,7 @@ if [ -d "$CODEX_DIR" ]; then
 fi
 
 # --- Output ---
-TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} ))
+TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} + ${#TOKEN_BOMBS[@]} ))
 
 if $JSON_MODE; then
     to_json() {
@@ -220,6 +282,7 @@ if $JSON_MODE; then
         "$(to_json "${STALE_ROLES[@]}")" \
         "$(to_json "${SECRET_HITS[@]}")" \
         "$(to_json "${CODEX_ISSUES[@]}")" \
+        "$(to_json "${TOKEN_BOMBS[@]}")" \
         <<'PYEOF'
 import json, sys
 print(json.dumps({
@@ -232,6 +295,7 @@ print(json.dumps({
     "stale_roles": json.loads(sys.argv[6]),
     "secret_hits": json.loads(sys.argv[7]),
     "codex_issues": json.loads(sys.argv[8]),
+    "token_bombs": json.loads(sys.argv[9]),
 }, indent=2))
 PYEOF
     exit 0
@@ -285,6 +349,12 @@ fi
 if [ ${#CODEX_ISSUES[@]} -gt 0 ]; then
     $QUIET || echo "--- Codex Issues (${#CODEX_ISSUES[@]}) ---"
     for item in "${CODEX_ISSUES[@]}"; do $QUIET || echo "  - $item"; done
+    $QUIET || echo ""
+fi
+
+if [ ${#TOKEN_BOMBS[@]} -gt 0 ]; then
+    $QUIET || echo "--- Token Bomb Risk (${#TOKEN_BOMBS[@]}) ---"
+    for item in "${TOKEN_BOMBS[@]}"; do $QUIET || echo "  - $item"; done
     $QUIET || echo ""
 fi
 
