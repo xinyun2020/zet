@@ -45,6 +45,7 @@ usage() {
     echo "  scan        Detect dead code and drift"
     echo "  validate    Check template frontmatter and structure"
     echo "  init        Scaffold a new harness project"
+    echo "  eval        Run skill quality evals (golden scenarios)"
     echo "  coverage    Report test and documentation coverage"
     echo "  doctor      Full health check (validate + scan + test)"
     echo "  new <type> <name>  Create a new template"
@@ -377,6 +378,10 @@ cmd_status() {
     fi
 }
 
+cmd_eval() {
+    bash "$ZET_CORE/eval.sh" "$@"
+}
+
 cmd_doctor() {
     source "$ZET_CORE/config.sh"
     zet_config_init "$ZET_ROOT"
@@ -432,6 +437,7 @@ case "$COMMAND" in
     validate)     cmd_validate "$@" ;;
     init)         cmd_init "$@" ;;
     new)          cmd_new "$@" ;;
+    eval)         cmd_eval "$@" ;;
     doctor)       cmd_doctor "$@" ;;
     healthcheck)  cmd_healthcheck "$@" ;;
     version|-v|--version) cmd_version ;;
