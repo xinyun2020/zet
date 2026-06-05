@@ -1,4 +1,11 @@
+---
+description: Full frontmatter reference — required fields, optional fields, naming conventions, type-specific behavior
+---
+
 # Template Specification v0.1
+
+- parent:
+  - [Lifecycle](lifecycle.md)
 
 Templates are the fundamental unit in Zet. A template is a markdown file with YAML frontmatter that defines a capability — a skill, agent, or rule.
 

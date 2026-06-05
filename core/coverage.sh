@@ -13,6 +13,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
+source "$SCRIPT_DIR/frontmatter.sh"
 
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
 zet_config_init "$ZET_ROOT"
@@ -40,12 +41,12 @@ if [ -d "$TEMPLATE_DIR" ]; then
         templates_total=$((templates_total + 1))
         name=$(basename "$file" | sed 's/_prompt_template\.md$//')
 
-        type=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^type:/{sub(/^type: */,"");print;exit}' "$file")
+        type=$(get_template_type "$file")
         if [ -n "$type" ]; then
             templates_valid=$((templates_valid + 1))
         fi
 
-        desc=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^description:/{sub(/^description: *"?/,"");sub(/"$/,"");print;exit}' "$file")
+        desc=$(get_frontmatter_value "$file" "description")
         if [ -n "$desc" ]; then
             templates_with_desc=$((templates_with_desc + 1))
         fi

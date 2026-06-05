@@ -1,0 +1,175 @@
+#!/bin/bash
+# zetcc — intelligent harness management (Claude Code plugin)
+# Usage: zetcc [command] [options]
+#
+# Commands:
+#   fix         Resolve issues found by zet doctor
+#   improve     Process friction logs and improve templates
+#   config      Audit and manage AI tool configuration
+#   (default)   Run fix if issues exist, otherwise interactive
+#
+# This is the AI-powered complement to `zet` (deterministic CLI).
+# zet finds problems → zetcc fixes them with judgment.
+#
+# Dependencies: claude (Claude Code CLI), zet, python3
+set -eo pipefail
+
+VERSION="0.1.0"
+
+# Resolve paths — use realpath (available on macOS since Catalina)
+if command -v realpath &>/dev/null; then
+    ZETCC_BIN="$(dirname "$(realpath "$0")")"
+else
+    SELF="$0"
+    if [ -L "$SELF" ]; then
+        LINK_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+        SELF="$LINK_DIR/$(readlink "$SELF")"
+    fi
+    ZETCC_BIN="$(cd "$(dirname "$SELF")" && pwd)"
+fi
+ZETCC_HOME="$(cd "$ZETCC_BIN/.." && pwd)"
+PLUGIN_DIR="$ZETCC_HOME/plugin"
+
+# ZET_ROOT: project root. Reads from env, or walks up from cwd looking for zet.toml
+if [ -z "$ZET_ROOT" ]; then
+    dir="$(pwd)"
+    while [ "$dir" != "/" ]; do
+        if [ -f "$dir/zet.toml" ]; then
+            ZET_ROOT="$dir"
+            break
+        fi
+        dir="$(dirname "$dir")"
+    done
+    if [ -z "$ZET_ROOT" ]; then
+        echo "ERROR: no zet.toml found (searched from $(pwd) to /). Set ZET_ROOT or cd into a zet project." >&2
+        exit 1
+    fi
+fi
+export ZET_ROOT
+
+# Cleanup trap
+cleanup() { :; }
+trap cleanup EXIT
+
+usage() {
+    echo "zetcc v$VERSION — intelligent harness management"
+    echo ""
+    echo "Usage: zetcc [command] [options]"
+    echo ""
+    echo "Commands:"
+    echo "  fix         Resolve issues found by zet doctor"
+    echo "  improve     Process friction logs, improve templates"
+    echo "  config      Audit AI tool configuration (Claude, Codex)"
+    echo ""
+    echo "Options:"
+    echo "  --dry-run   Show what would be fixed without acting"
+    echo "  -h, --help  Show this help"
+    echo ""
+    echo "Project root: \$ZET_ROOT or auto-detected from zet.toml"
+}
+
+# --- Preflight ---
+preflight() {
+    if ! command -v claude &>/dev/null; then
+        echo "ERROR: claude (Claude Code CLI) not found." >&2
+        exit 1
+    fi
+
+    if ! command -v zet &>/dev/null; then
+        echo "ERROR: zet CLI not found." >&2
+        exit 1
+    fi
+
+    if [ ! -d "$PLUGIN_DIR/.claude-plugin" ]; then
+        echo "ERROR: plugin directory not found at $PLUGIN_DIR" >&2
+        exit 1
+    fi
+}
+
+# --- Build system prompt ---
+build_system_prompt() {
+    local command="$1"
+    local doctor_json
+    doctor_json=$(cd "$ZET_ROOT" && zet doctor --json 2>/dev/null || echo '{"total":0,"error":"doctor failed"}')
+    local total
+    total=$(printf '%s' "$doctor_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total',0))" 2>/dev/null || echo "0")
+    local current_date
+    current_date=$(date +"%Y-%m-%d %H:%M %A")
+
+    # Detect managed tools
+    local tools_info=""
+    if [ -d "$HOME/.claude" ]; then
+        tools_info+="- Claude Code: ~/.claude/ (settings.json, mcp.yaml, hooks/, skills/, agents/, rules/)"$'\n'
+    fi
+    if [ -d "$HOME/.codex" ]; then
+        tools_info+="- Codex: ~/.codex/ (config.toml, memories/, skills/)"$'\n'
+    fi
+
+    local prompt=""
+    prompt+="## Session Context"$'\n\n'
+    prompt+="Command: ${command}"$'\n'
+    prompt+="ZET_ROOT: ${ZET_ROOT}"$'\n'
+    prompt+="Date: ${current_date}"$'\n'
+    prompt+="Issues found: ${total}"$'\n\n'
+    prompt+="## Managed AI tools"$'\n'
+    prompt+="${tools_info}"$'\n'
+    prompt+="## zet doctor output (JSON)"$'\n'
+    prompt+='```json'$'\n'
+    prompt+="${doctor_json}"$'\n'
+    prompt+='```'$'\n\n'
+    prompt+="## Key paths (from zet.toml)"$'\n'
+    prompt+="- ZET_ROOT: ${ZET_ROOT}"$'\n'
+    prompt+="- zet.toml: ${ZET_ROOT}/zet.toml"$'\n'
+
+    printf '%s' "$prompt"
+}
+
+# --- Run claude with plugin ---
+run_claude() {
+    local command="$1"
+    shift
+
+    local system_prompt
+    system_prompt=$(build_system_prompt "$command")
+
+    local message
+    case "$command" in
+        fix)
+            message="Run the fix skill: resolve all issues from zet doctor. Auto-fix safe items, present risky items for confirmation."
+            ;;
+        improve)
+            message="Run the improve skill: scan recent files for friction: entries, identify template improvement opportunities, and apply fixes."
+            ;;
+        config)
+            message="Run the config skill: audit all managed AI tool configs for ghost entries, drift, and cleanup."
+            ;;
+        *)
+            message="Harness health check. If issues exist, fix them. Otherwise, show status and ask what I'd like to do."
+            ;;
+    esac
+
+    claude \
+        --agent "zetcc:orchestrator" \
+        --plugin-dir "$PLUGIN_DIR" \
+        --append-system-prompt "$system_prompt" \
+        "$message" \
+        "$@"
+}
+
+# --- Dispatch ---
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    fix)         preflight; run_claude fix "$@" ;;
+    improve)     preflight; run_claude improve "$@" ;;
+    config)      preflight; run_claude config "$@" ;;
+    version|-v)  echo "zetcc $VERSION" ;;
+    help|-h|--help) usage ;;
+    "")          preflight; run_claude auto "$@" ;;
+    *)
+        echo "Unknown command: $COMMAND" >&2
+        echo "Run 'zetcc --help' for usage." >&2
+        exit 1
+        ;;
+esac

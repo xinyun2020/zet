@@ -19,22 +19,17 @@ set -e
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
+source "$SCRIPT_DIR/frontmatter.sh"
 zet_config_init "$ZET_ROOT"
-
-# Resolve paths from config. Relative paths become absolute (relative to ZET_ROOT)
-# because generated files (skills, agents, rules) live OUTSIDE the project tree
-# (e.g. ~/.claude/skills/) — relative paths in "follow" instructions would break.
-resolve_path() {
-    local path="$1"
-    path="${path%/}"  # strip trailing slash
-    [[ "$path" == /* ]] && echo "$path" && return  # already absolute
-    echo "$ZET_ROOT/$path"
-}
 
 TEMPLATE_DIR="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templates" "$ZET_ROOT/templates")}")"
 SKILLS_DIR="$(resolve_path "${ZET_SKILLS:-$(zet_config_get "paths" "skills" "$HOME/.claude/skills")}")"
 AGENTS_DIR="$(resolve_path "${ZET_AGENTS:-$(zet_config_get "paths" "agents" "$HOME/.claude/agents")}")"
 RULES_DIR="$(resolve_path "${ZET_RULES:-$(zet_config_get "paths" "rules" "$HOME/.claude/rules")}")"
+# Agent Skills Open Standard output (interop with Codex, Cursor, Gemini CLI, etc.)
+_agents_std_raw="${ZET_AGENTS_STD:-$(zet_config_get "paths" "agents-std" "")}"
+AGENTS_STD_DIR=""
+[ -n "$_agents_std_raw" ] && AGENTS_STD_DIR="$(resolve_path "$_agents_std_raw")"
 # Model roles: read from [model-roles] section in zet.toml (preferred),
 # fall back to standalone file for backwards compatibility
 MODEL_ROLES_FILE="$(resolve_path "${ZET_MODEL_ROLES:-$(zet_config_get "project" "model-roles-file" "$ZET_ROOT/model-roles.conf")}")"
@@ -59,6 +54,7 @@ fi
 $QUIET || echo "=== Zet Generate ==="
 $QUIET || echo "Templates: $TEMPLATE_DIR"
 $QUIET || echo "Output: skills=$SKILLS_DIR | agents=$AGENTS_DIR | rules=$RULES_DIR"
+[ -n "$AGENTS_STD_DIR" ] && ! $QUIET && echo "Interop: $AGENTS_STD_DIR (Agent Skills Open Standard)"
 ! $QUIET && $DRY_RUN && echo "DRY RUN — no files will be written"
 
 # --- Helpers ---
@@ -89,16 +85,6 @@ resolve_model_role() {
         return 0
     fi
     return 1
-}
-
-get_template_type() {
-    local file="$1"
-    awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^type:/{sub(/^type: */,"");print;exit}' "$file"
-}
-
-get_frontmatter_value() {
-    local file="$1" key="$2"
-    awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^'"$key"':/{sub(/^'"$key"': *"?/,"");sub(/"$/,"");print;exit}' "$file"
 }
 
 generate_file() {
@@ -166,11 +152,13 @@ generate_file() {
 ensure_dir "$SKILLS_DIR"
 ensure_dir "$AGENTS_DIR"
 ensure_dir "$RULES_DIR"
+[ -n "$AGENTS_STD_DIR" ] && ensure_dir "$AGENTS_STD_DIR"
 
 # --- Generate ---
 skill_count=0
 agent_count=0
 rule_count=0
+interop_count=0
 seen_names=""
 
 for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
@@ -258,6 +246,14 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
 
             $QUIET || echo "  skill: $name"
             skill_count=$((skill_count + 1))
+
+            # Agent Skills Open Standard output (interop with Codex, Cursor, etc.)
+            # Same SKILL.md format but written to /.agents/skills/ for cross-tool discovery
+            if [ -n "$AGENTS_STD_DIR" ] && ! $DRY_RUN; then
+                mkdir -p "$AGENTS_STD_DIR/$name"
+                cp "$skill_dir/SKILL.md" "$AGENTS_STD_DIR/$name/SKILL.md"
+                interop_count=$((interop_count + 1))
+            fi
             ;;
 
         agent)
@@ -316,7 +312,12 @@ $QUIET || echo ""
 cleanup_stale "$SKILLS_DIR" "*/" "skill"
 cleanup_stale "$AGENTS_DIR" "*.md" "agent"
 cleanup_stale "$RULES_DIR" "*.md" "rule"
+[ -n "$AGENTS_STD_DIR" ] && cleanup_stale "$AGENTS_STD_DIR" "*/" "skill"
 
 # --- Summary ---
 $QUIET || echo ""
-$QUIET || echo "Generated: $skill_count skills, $agent_count agents, $rule_count rules"
+if [ -n "$AGENTS_STD_DIR" ]; then
+    $QUIET || echo "Generated: $skill_count skills, $agent_count agents, $rule_count rules ($interop_count interop)"
+else
+    $QUIET || echo "Generated: $skill_count skills, $agent_count agents, $rule_count rules"
+fi

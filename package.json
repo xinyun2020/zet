@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "description": "The framework for natural language as code",
   "bin": {
-    "zet": "bin/zet"
+    "zet": "bin/zet",
+    "zetcc": "bin/zetcc"
   },
   "files": [
     "bin/",
     "core/",
     "hooks/",
+    "plugin/",
     "install.sh",
     "LICENSE",
     "README.md"

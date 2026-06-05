@@ -1,0 +1,7 @@
+{
+  "name": "zetcc",
+  "description": "Intelligent harness management — fixes issues zet doctor finds, improves templates, manages Claude Code config",
+  "author": {
+    "name": "Xinyun Zhang"
+  }
+}

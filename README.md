@@ -40,7 +40,10 @@ npm install -g @xinyun2020/zet
 zet init
 zet generate
 
-# Option 3: curl install (no Node required)
+# Option 3: Homebrew (macOS)
+brew tap xinyun2020/tap && brew install zet
+
+# Option 4: curl install (no Node required)
 curl -fsSL https://raw.githubusercontent.com/xinyun2020/zet/main/install.sh | bash
 ```
 
@@ -80,9 +83,12 @@ version = "0.1.0"
 
 [paths]
 templates = "templates/"
-skills = "skills/"
-agents = "agents/"
-rules = "rules/"
+skills = "~/.claude/skills/"
+agents = "~/.claude/agents/"
+rules = "~/.claude/rules/"
+
+# Optional: generate Agent Skills Open Standard output for cross-tool interop
+# agents-std = ".agents/skills/"
 
 [model-roles]
 audit = "haiku"
@@ -90,53 +96,34 @@ execute = "sonnet"
 think = "opus"
 ```
 
-## Template Types
+### Multi-tool output (Codex, Cursor, Gemini CLI, etc.)
 
-Templates are markdown files with YAML frontmatter — the source of truth for your entire AI config:
+Zet generates Claude Code config by default. To also output the [Agent Skills Open Standard](https://agentskills.io) format (read by 30+ tools including Codex CLI, Cursor, Gemini CLI, Kiro, and Windsurf), add `agents-std` to your paths:
 
-```yaml
----
-type: skill
-description: "Review code for security vulnerabilities"
-role: execute
----
-Your prompt content here...
+```toml
+[paths]
+templates = "templates/"
+skills = "~/.claude/skills/"
+agents-std = ".agents/skills/"   # interop output (gitignored or committed — your choice)
 ```
 
-```yaml
----
-type: agent
-role: think
-context: fork
----
+Then run `zet generate` as normal. Skills are written to BOTH locations from the same templates — single source of truth, multiple consumers.
+
+You can also set it via environment variable for one-off runs:
+
+```bash
+ZET_AGENTS_STD=".agents/skills/" zet generate
 ```
 
-```yaml
----
-type: rule
-paths:
-  - "src/**/*.ts"
----
-```
+The interop output uses the same SKILL.md format (YAML frontmatter + markdown body) that Claude Code uses. No translation, no lossy conversion — the format IS the standard.
 
-## Core Concepts
+## Documentation
 
-| Concept | What it does | Analogy |
-|---------|-------------|---------|
-| Template | Source of truth for a skill, agent, or rule | `.ts` source file |
-| Generator | Transforms templates into deployed config | `tsc` / webpack |
-| Scanner | Finds dead code, orphaned files, drift | `knip` / dead code detector |
-| Doctor | Health checks across the whole harness | `eslint --fix` |
-| Hooks | Enforce constraints mechanically | git hooks / husky |
-| `zet.toml` | Project configuration | `package.json` |
-
-## Philosophy
-
-- Extract from working systems, don't invent from scratch
-- Convention over configuration
-- Progressive disclosure — start with one template, grow into a full harness
-- Zero external dependencies (bash + standard unix tools)
-- Zet manages itself with Zet
+- [Concept](docs/concept.md) — why AI config needs engineering rigor
+- [Primitives](docs/primitives.md) — the four building blocks (template, hook, generator, scanner)
+- [Lifecycle](docs/lifecycle.md) — create → validate → generate → test → scan → improve
+- [Template Spec](docs/template-spec.md) — full frontmatter reference and naming conventions
+- [Examples](examples/) — real templates you can copy and use immediately
 
 ## Upgrade
 

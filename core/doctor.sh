@@ -1,12 +1,12 @@
 #!/bin/bash
 # Zet Doctor — validate config health and detect common problems
-# Usage: doctor.sh [--json] [--fix]
+# Usage: doctor.sh [--json] [--quiet]
 # Dependencies: bash, grep, find
 #
 # Checks:
 #   1. Broken symlinks in output dirs (skills, agents, rules)
 #   2. Stale paths in instruction files (CLAUDE.md etc)
-#   3. Broken wiki links in templates ([[name_prompt_template]])
+#   3. Broken template references ([[name_prompt_template]])
 #   4. Rule files missing paths: or global: frontmatter
 #   5. Template description completeness
 #   6. Model-roles staleness (roles referenced but not defined)
@@ -19,38 +19,25 @@ set -eo pipefail
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
+source "$SCRIPT_DIR/frontmatter.sh"
 zet_config_init "$ZET_ROOT"
 
-TEMPLATE_DIR="${ZET_TEMPLATES:-$(zet_config_get "paths" "templates" "$ZET_ROOT/templates")}"
-SKILLS_DIR="${ZET_SKILLS:-$(zet_config_get "paths" "skills" "$HOME/.claude/skills")}"
-AGENTS_DIR="${ZET_AGENTS:-$(zet_config_get "paths" "agents" "$HOME/.claude/agents")}"
-RULES_DIR="${ZET_RULES:-$(zet_config_get "paths" "rules" "$HOME/.claude/rules")}"
+TEMPLATE_DIR="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templates" "$ZET_ROOT/templates")}")"
+SKILLS_DIR="$(resolve_path "${ZET_SKILLS:-$(zet_config_get "paths" "skills" "$HOME/.claude/skills")}")"
+AGENTS_DIR="$(resolve_path "${ZET_AGENTS:-$(zet_config_get "paths" "agents" "$HOME/.claude/agents")}")"
+RULES_DIR="$(resolve_path "${ZET_RULES:-$(zet_config_get "paths" "rules" "$HOME/.claude/rules")}")"
 MODEL_ROLES="${ZET_MODEL_ROLES:-$(zet_config_get "project" "model-roles-file" "$ZET_ROOT/model-roles.conf")}"
 INSTRUCTION_FILES="${ZET_INSTRUCTION_FILES:-$(zet_config_get "doctor" "instruction-files" "")}"
 
 JSON_MODE=false
-# shellcheck disable=SC2034  # reserved for future --fix implementation
-FIX_MODE=false
 QUIET=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --json)  JSON_MODE=true; shift ;;
-        --fix)   FIX_MODE=true; shift ;;
         --quiet) QUIET=true; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
-
-# --- Helpers ---
-get_frontmatter_value() {
-    local file="$1" key="$2"
-    awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^'"$key"':/{sub(/^'"$key"': *"?/,"");sub(/"$/,"");print;exit}' "$file"
-}
-
-get_template_type() {
-    local file="$1"
-    awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^type:/{sub(/^type: */,"");print;exit}' "$file"
-}
 
 # Secret patterns — broad enough to catch real leaks, narrow enough to skip examples
 SECRET_PATTERNS=(
@@ -66,7 +53,7 @@ SECRET_PATTERNS=(
 # --- Collectors ---
 declare -a BROKEN_SYMLINKS=()
 declare -a STALE_PATHS=()
-declare -a BROKEN_WIKI_LINKS=()
+declare -a BROKEN_REFS=()
 declare -a MISSING_RULE_PATHS=()
 declare -a MISSING_DESCRIPTIONS=()
 declare -a STALE_ROLES=()
@@ -107,16 +94,16 @@ for inst_file in "${inst_files[@]}"; do
     done < <(grep -oE '~/[A-Za-z0-9_./-]+|(\$HOME)/[A-Za-z0-9_./-]+' "$inst_file" 2>/dev/null | sort -u)
 done
 
-# --- 3. Broken wiki links in templates ---
+# --- 3. Broken template references in templates ---
 if [ -d "$TEMPLATE_DIR" ]; then
     for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
         [ -f "$file" ] || continue
         filename=$(basename "$file")
-        # Extract [[name_prompt_template]] wiki links, skip those inside backtick code spans
+        # Extract [[name_prompt_template]] template references, skip those inside backtick code spans
         while IFS= read -r ref; do
             match=$(find "$TEMPLATE_DIR" -name "${ref}.md" 2>/dev/null | head -1)
             if [ -z "$match" ]; then
-                BROKEN_WIKI_LINKS+=("$filename:[[$ref]]")
+                BROKEN_REFS+=("$filename:[[$ref]]")
             fi
         done < <(grep -v '`\[\[.*_prompt_template' "$file" 2>/dev/null | grep -oE '\[\[[^]]*_prompt_template[^]]*\]\]' | sed 's/\[\[//;s/\]\]//;s/#.*//' | sort -u)
     done
@@ -176,8 +163,47 @@ if [ -d "$TEMPLATE_DIR" ]; then
     done
 fi
 
+# --- 8. Codex health (if ~/.codex/ exists) ---
+declare -a CODEX_ISSUES=()
+CODEX_DIR="$HOME/.codex"
+if [ -d "$CODEX_DIR" ]; then
+    # Check config.toml exists and has model_provider
+    if [ ! -f "$CODEX_DIR/config.toml" ]; then
+        CODEX_ISSUES+=("config.toml missing")
+    elif ! grep -q 'model_provider' "$CODEX_DIR/config.toml" 2>/dev/null; then
+        CODEX_ISSUES+=("config.toml: no model_provider configured")
+    fi
+
+    # Check for stale project trust entries (projects that no longer exist on disk)
+    if [ -f "$CODEX_DIR/config.toml" ]; then
+        while IFS= read -r project_path; do
+            # Extract path from TOML section header: [projects."/path/to/project"]
+            clean_path=$(echo "$project_path" | sed 's/.*"\(.*\)".*/\1/')
+            if [ -n "$clean_path" ] && [ ! -d "$clean_path" ]; then
+                CODEX_ISSUES+=("stale project: $clean_path (directory missing)")
+            fi
+        done < <(grep '^\[projects\.' "$CODEX_DIR/config.toml" 2>/dev/null)
+    fi
+
+    # Check for AGENTS.md in projects that have CLAUDE.md (instruction gap)
+    if [ -f "$CODEX_DIR/config.toml" ]; then
+        while IFS= read -r project_path; do
+            clean_path=$(echo "$project_path" | sed 's/.*"\(.*\)".*/\1/')
+            if [ -n "$clean_path" ] && [ -d "$clean_path" ]; then
+                has_claude=false
+                has_agents=false
+                [ -f "$clean_path/CLAUDE.md" ] && has_claude=true
+                [ -f "$clean_path/AGENTS.md" ] && has_agents=true
+                if $has_claude && ! $has_agents; then
+                    CODEX_ISSUES+=("instruction gap: $clean_path has CLAUDE.md but no AGENTS.md")
+                fi
+            fi
+        done < <(grep '^\[projects\.' "$CODEX_DIR/config.toml" 2>/dev/null)
+    fi
+fi
+
 # --- Output ---
-TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_WIKI_LINKS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} ))
+TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} ))
 
 if $JSON_MODE; then
     to_json() {
@@ -188,22 +214,24 @@ if $JSON_MODE; then
     python3 - \
         "$(to_json "${BROKEN_SYMLINKS[@]}")" \
         "$(to_json "${STALE_PATHS[@]}")" \
-        "$(to_json "${BROKEN_WIKI_LINKS[@]}")" \
+        "$(to_json "${BROKEN_REFS[@]}")" \
         "$(to_json "${MISSING_RULE_PATHS[@]}")" \
         "$(to_json "${MISSING_DESCRIPTIONS[@]}")" \
         "$(to_json "${STALE_ROLES[@]}")" \
         "$(to_json "${SECRET_HITS[@]}")" \
+        "$(to_json "${CODEX_ISSUES[@]}")" \
         <<'PYEOF'
 import json, sys
 print(json.dumps({
     "total": sum(len(json.loads(a)) for a in sys.argv[1:]),
     "broken_symlinks": json.loads(sys.argv[1]),
     "stale_paths": json.loads(sys.argv[2]),
-    "broken_wiki_links": json.loads(sys.argv[3]),
+    "broken_refs": json.loads(sys.argv[3]),
     "missing_rule_paths": json.loads(sys.argv[4]),
     "missing_descriptions": json.loads(sys.argv[5]),
     "stale_roles": json.loads(sys.argv[6]),
     "secret_hits": json.loads(sys.argv[7]),
+    "codex_issues": json.loads(sys.argv[8]),
 }, indent=2))
 PYEOF
     exit 0
@@ -224,9 +252,9 @@ if [ ${#STALE_PATHS[@]} -gt 0 ]; then
     $QUIET || echo ""
 fi
 
-if [ ${#BROKEN_WIKI_LINKS[@]} -gt 0 ]; then
-    $QUIET || echo "--- Broken Wiki Links (${#BROKEN_WIKI_LINKS[@]}) ---"
-    for item in "${BROKEN_WIKI_LINKS[@]}"; do $QUIET || echo "  - $item"; done
+if [ ${#BROKEN_REFS[@]} -gt 0 ]; then
+    $QUIET || echo "--- Broken Template References (${#BROKEN_REFS[@]}) ---"
+    for item in "${BROKEN_REFS[@]}"; do $QUIET || echo "  - $item"; done
     $QUIET || echo ""
 fi
 
@@ -251,6 +279,12 @@ fi
 if [ ${#SECRET_HITS[@]} -gt 0 ]; then
     $QUIET || echo "--- Potential Secrets (${#SECRET_HITS[@]}) ---"
     for item in "${SECRET_HITS[@]}"; do $QUIET || echo "  - $item"; done
+    $QUIET || echo ""
+fi
+
+if [ ${#CODEX_ISSUES[@]} -gt 0 ]; then
+    $QUIET || echo "--- Codex Issues (${#CODEX_ISSUES[@]}) ---"
+    for item in "${CODEX_ISSUES[@]}"; do $QUIET || echo "  - $item"; done
     $QUIET || echo ""
 fi
 

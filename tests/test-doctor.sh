@@ -72,24 +72,24 @@ assert_contains_str "$output" '"broken_symlinks"' "reports broken symlinks"
 assert_not_contains_str "$output" '"total": 0' "total is nonzero"
 teardown
 
-# Test 3: Broken wiki link detection
+# Test 3: Broken template reference detection
 echo ""
-echo "--- Broken wiki links ---"
+echo "--- Broken template references ---"
 setup
 cat > "$ZET_TEMPLATES/linker_prompt_template.md" <<'EOF'
 ---
 type: skill
-description: Has wiki links
+description: Has template references
 ---
 See [[nonexistent_prompt_template]] for details.
 EOF
 output=$(run_doctor_json)
-assert_contains_str "$output" "nonexistent_prompt_template" "detects broken wiki link"
+assert_contains_str "$output" "nonexistent_prompt_template" "detects broken template reference"
 teardown
 
-# Test 4: Valid wiki link not flagged
+# Test 4: Valid template reference not flagged
 echo ""
-echo "--- Valid wiki links ---"
+echo "--- Valid template references ---"
 setup
 cat > "$ZET_TEMPLATES/target_prompt_template.md" <<'EOF'
 ---
@@ -106,7 +106,7 @@ description: Source references target
 See [[target_prompt_template]] for details.
 EOF
 output=$(run_doctor_json)
-assert_contains_str "$output" '"broken_wiki_links": []' "valid wiki links not flagged"
+assert_contains_str "$output" '"broken_refs": []' "valid template references not flagged"
 teardown
 
 # Test 5: Rule missing paths
