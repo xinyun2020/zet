@@ -212,6 +212,46 @@ assert_contains_str "$output" '"ambiguous_with"' "reports ambiguous overlap fiel
 assert_contains_str "$output" "dup_two_prompt_template" "names the overlapping sibling"
 teardown
 
+# Test 5e: Token split — always-loaded vs on-demand reported in JSON
+echo ""
+echo "--- Token split: always-loaded vs on-demand ---"
+setup
+cat > "$ZET_TEMPLATES/split_one_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Use when the user wants to split tokens — a skill with a real trigger and enough description length to be specific.
+---
+# Split One
+Use Read to gather data. This body is the on-demand portion that only loads when the skill fires, so it should count toward on-demand not always-loaded.
+EOF
+output=$(run_optimize_json)
+assert_contains_str "$output" '"token_budget"' "reports token_budget section"
+assert_contains_str "$output" '"always_loaded_tokens"' "reports always-loaded token total"
+assert_contains_str "$output" '"on_demand_tokens"' "reports on-demand token total"
+assert_contains_str "$output" '"always_loaded_pct_of_200k"' "reports always-loaded as pct of 200k window"
+teardown
+
+# Test 5f: Budget gate — --budget exits non-zero when always-loaded exceeds the cap
+echo ""
+echo "--- Budget gate: --budget exit code ---"
+setup
+cat > "$ZET_TEMPLATES/budget_one_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Use when the user wants to test the budget gate — a trigger-bearing description of sufficient length.
+---
+# Budget One
+Use Read.
+EOF
+# A budget of 0 always-loaded tokens must be exceeded (frontmatter alone is non-zero) → exit non-zero.
+# `|| true` so set -e doesn't abort the test on the intentional non-zero exit.
+budget_exit=0; bash "$OPTIMIZE" --quiet --budget 0 >/dev/null 2>&1 || budget_exit=$?
+assert_contains_str "$budget_exit" "1" "budget exceeded exits non-zero"
+# A generous budget must pass the gate → exit zero (no other issues in this clean skill).
+budget_ok_exit=0; bash "$OPTIMIZE" --quiet --budget 200000 >/dev/null 2>&1 || budget_ok_exit=$?
+assert_contains_str "$budget_ok_exit" "0" "within budget exits zero"
+teardown
+
 # Test 6: No templates — graceful empty output
 echo ""
 echo "--- Empty project: no templates ---"

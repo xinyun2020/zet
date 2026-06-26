@@ -43,14 +43,31 @@ TEMPLATE_DIR="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templat
 JSON_MODE=false
 QUIET=false
 VERBOSE=false
+BUDGET=""   # if set (--budget N), exit non-zero when always-loaded tokens exceed N
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --json)    JSON_MODE=true; shift ;;
         --quiet)   QUIET=true; shift ;;
         --verbose) VERBOSE=true; shift ;;
+        --budget)  BUDGET="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+# Token accounting model (the split the field standardized on):
+#   always-loaded = what sits in EVERY session's context window unconditionally —
+#                   the full CLAUDE.md + everything in rules/ + the frontmatter (name +
+#                   description) of every skill/agent (the agent always sees these to decide
+#                   what to invoke). This is the number that competes for the context budget.
+#   on-demand     = skill/agent BODIES — loaded only when that skill actually fires.
+# 4.5 chars/token is empirically tuned for English + Markdown (closer than the naive 4).
+CHAR_PER_TOKEN_NUM=10   # 10/45 = 0.222 tokens/char = 4.5 chars/token (integer-safe ratio)
+CHAR_PER_TOKEN_DEN=45
+CONTEXT_WINDOW=200000
+# Always-loaded config files. Resolve with sane defaults; skip silently if absent (e.g. test
+# harness has no ~/.claude) so the count degrades to frontmatter-only rather than erroring.
+CLAUDE_MD="$(resolve_path "${ZET_CLAUDE_MD:-$HOME/.claude/CLAUDE.md}")"
+RULES_DIR="$(resolve_path "${ZET_RULES_DIR:-$HOME/.claude/rules}")"
 
 # --- Tool detection patterns ---
 # Maps tool names to regex patterns that indicate usage
@@ -73,6 +90,9 @@ declare -a SKILL_TOKENS=()
 declare -a SKILL_BODIES=()
 declare -a SKILL_RELIABILITY=()
 TOTAL_SKILLS=0
+# Token-split accumulators (chars; converted to tokens after the loop)
+ALWAYS_LOADED_CHARS=0
+ON_DEMAND_CHARS=0
 
 # Trigger phrases an agent looks for when deciding whether to invoke a skill.
 # A description without any of these reads as passive documentation, not an
@@ -111,10 +131,15 @@ if [ -d "$TEMPLATE_DIR" ]; then
         SKILL_RISKS+=("$risk")
 
         # --- 3. Token cost estimation ---
-        # Rough estimate: ~4 chars per token (conservative for English + code)
+        # On-demand cost = the body (loaded only when the skill fires). 4.5 chars/token.
         char_count=${#body}
-        token_estimate=$(( (char_count + 3) / 4 ))
+        token_estimate=$(( (char_count * CHAR_PER_TOKEN_NUM + CHAR_PER_TOKEN_DEN - 1) / CHAR_PER_TOKEN_DEN ))
         SKILL_TOKENS+=("$token_estimate")
+        # Always-loaded contribution = this skill's frontmatter (name + description), which the
+        # agent sees every session to decide whether to invoke. Sum across all skills below.
+        fm_block=$(awk 'BEGIN{n=0} /^---$/{n++; if(n==2) exit} n>=1{print}' "$file")
+        ALWAYS_LOADED_CHARS=$(( ALWAYS_LOADED_CHARS + ${#fm_block} ))
+        ON_DEMAND_CHARS=$(( ON_DEMAND_CHARS + char_count ))
 
         # --- 4. Invocation reliability (description-only signal) ---
         # A skill fires only if its description gives the agent something to
@@ -249,6 +274,31 @@ PYEOF
 fi
 AMBIGUOUS_PAIRS=${AMBIGUOUS_PAIRS:-"[]"}
 
+# --- Token budget (always-loaded vs on-demand) ---
+# Always-loaded also includes the full CLAUDE.md + everything in rules/ (read every session),
+# on top of the per-skill frontmatter summed in the loop. Missing files contribute 0 (graceful).
+if [ -f "$CLAUDE_MD" ]; then
+    bytes=$(wc -c < "$CLAUDE_MD" | tr -d ' ')
+    ALWAYS_LOADED_CHARS=$(( ALWAYS_LOADED_CHARS + bytes ))
+fi
+if [ -d "$RULES_DIR" ]; then
+    for rf in "$RULES_DIR"/*.md; do
+        [ -f "$rf" ] || continue
+        bytes=$(wc -c < "$rf" | tr -d ' ')
+        ALWAYS_LOADED_CHARS=$(( ALWAYS_LOADED_CHARS + bytes ))
+    done
+fi
+ALWAYS_LOADED_TOKENS=$(( (ALWAYS_LOADED_CHARS * CHAR_PER_TOKEN_NUM + CHAR_PER_TOKEN_DEN - 1) / CHAR_PER_TOKEN_DEN ))
+ON_DEMAND_TOKENS=$(( (ON_DEMAND_CHARS * CHAR_PER_TOKEN_NUM + CHAR_PER_TOKEN_DEN - 1) / CHAR_PER_TOKEN_DEN ))
+# Always-loaded as a percentage of the context window (one decimal, integer-only arithmetic).
+ALWAYS_LOADED_PCT=$(( ALWAYS_LOADED_TOKENS * 1000 / CONTEXT_WINDOW ))
+ALWAYS_LOADED_PCT_STR="$(( ALWAYS_LOADED_PCT / 10 )).$(( ALWAYS_LOADED_PCT % 10 ))"
+# Budget gate: over the cap is an actionable issue (drives the non-zero exit below).
+OVER_BUDGET=false
+if [ -n "$BUDGET" ] && [ "$ALWAYS_LOADED_TOKENS" -gt "$BUDGET" ]; then
+    OVER_BUDGET=true
+fi
+
 # --- Output ---
 HAS_HIGH_RISK=false
 HAS_REDUNDANCY=false
@@ -272,7 +322,10 @@ if $JSON_MODE; then
 
     # Pass JSON arrays via env, NOT as source literals: skill content can
     # contain quotes/backslashes that break triple-quoted string embedding.
-    printf '%s' "$skills_data" | ZET_REDUNDANCY_JSON="$REDUNDANCY_PAIRS" ZET_AMBIGUOUS_JSON="$AMBIGUOUS_PAIRS" python3 -c "
+    printf '%s' "$skills_data" | ZET_REDUNDANCY_JSON="$REDUNDANCY_PAIRS" ZET_AMBIGUOUS_JSON="$AMBIGUOUS_PAIRS" \
+        ZET_ALWAYS_LOADED_TOKENS="$ALWAYS_LOADED_TOKENS" ZET_ON_DEMAND_TOKENS="$ON_DEMAND_TOKENS" \
+        ZET_ALWAYS_LOADED_PCT="$ALWAYS_LOADED_PCT_STR" ZET_CONTEXT_WINDOW="$CONTEXT_WINDOW" \
+        ZET_BUDGET="$BUDGET" ZET_OVER_BUDGET="$OVER_BUDGET" python3 -c "
 import sys, json, os
 
 lines = [l for l in sys.stdin.read().strip().split('\n') if l]
@@ -303,14 +356,28 @@ for line in lines:
         entry['ambiguous_with'] = sorted(set(ambiguous_by_skill[name]))
     invocation_reliability.append(entry)
 
+budget_env = os.environ.get('ZET_BUDGET', '')
+token_budget = {
+    'always_loaded_tokens': int(os.environ.get('ZET_ALWAYS_LOADED_TOKENS', '0')),
+    'on_demand_tokens': int(os.environ.get('ZET_ON_DEMAND_TOKENS', '0')),
+    'context_window': int(os.environ.get('ZET_CONTEXT_WINDOW', '200000')),
+    'always_loaded_pct_of_200k': float(os.environ.get('ZET_ALWAYS_LOADED_PCT', '0')),
+}
+if budget_env:
+    token_budget['budget'] = int(budget_env)
+    token_budget['over_budget'] = os.environ.get('ZET_OVER_BUDGET', 'false') == 'true'
+
 print(json.dumps({
     'total_skills': len(lines),
     'permissions': permissions,
     'token_costs': token_costs,
     'redundancy': redundancy,
-    'invocation_reliability': invocation_reliability
+    'invocation_reliability': invocation_reliability,
+    'token_budget': token_budget
 }, indent=2))
 "
+    # Budget gate applies in JSON mode too: over budget → non-zero exit for CI.
+    $OVER_BUDGET && exit 1
     exit 0
 fi
 
@@ -322,6 +389,7 @@ $QUIET || echo ""
 
 if [ "$TOTAL_SKILLS" -eq 0 ]; then
     $QUIET || echo "No skills found."
+    $OVER_BUDGET && exit 1
     exit 0
 fi
 
@@ -338,8 +406,21 @@ $QUIET || echo ""
 # Token costs (sorted by size, show top 10)
 $QUIET || echo "--- Token Cost (top by size) ---"
 for i in "${!SKILL_NAMES[@]}"; do
-    $QUIET || echo "  ${SKILL_NAMES[$i]}: ~${SKILL_TOKENS[$i]} tokens"
+    $QUIET || echo "  ${SKILL_NAMES[$i]}: ~${SKILL_TOKENS[$i]} tokens (on-demand)"
 done
+$QUIET || echo ""
+
+# Token budget — the number that actually competes for the context window
+$QUIET || echo "--- Token Budget (always-loaded vs on-demand) ---"
+$QUIET || echo "  Always-loaded: ~${ALWAYS_LOADED_TOKENS} tokens (${ALWAYS_LOADED_PCT_STR}% of ${CONTEXT_WINDOW}) — CLAUDE.md + rules/ + every skill's frontmatter"
+$QUIET || echo "  On-demand:     ~${ON_DEMAND_TOKENS} tokens — skill bodies, loaded only when a skill fires"
+if [ -n "$BUDGET" ]; then
+    if $OVER_BUDGET; then
+        $QUIET || echo "  OVER BUDGET: always-loaded ${ALWAYS_LOADED_TOKENS} > budget ${BUDGET} — trim CLAUDE.md/rules or move detail on-demand"
+    else
+        $QUIET || echo "  Within budget: always-loaded ${ALWAYS_LOADED_TOKENS} <= budget ${BUDGET}"
+    fi
+fi
 $QUIET || echo ""
 
 # Redundancy
@@ -373,7 +454,7 @@ elif $VERBOSE; then
 fi
 $QUIET || echo ""
 
-if $HAS_HIGH_RISK || $HAS_REDUNDANCY || $HAS_UNRELIABLE; then
+if $HAS_HIGH_RISK || $HAS_REDUNDANCY || $HAS_UNRELIABLE || $OVER_BUDGET; then
     $QUIET || echo "=== Optimization opportunities found ==="
     exit 1
 else
