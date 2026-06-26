@@ -55,6 +55,7 @@ zet generate          # Build skills/agents/rules from templates
 zet test              # Run your test suite
 zet scan              # Detect dead code, orphaned hooks, drift
 zet doctor            # Health check (broken links, stale paths, secrets)
+zet optimize          # Harness optimization (token cost, redundancy, invocation reliability)
 zet healthcheck       # All of the above in one pass
 zet new <type> <name> # Create a new template (skill, agent, or rule)
 zet coverage          # Report test and documentation coverage
@@ -123,6 +124,8 @@ The interop output uses the same SKILL.md format (YAML frontmatter + markdown bo
 - [Primitives](docs/primitives.md) — the four building blocks (template, hook, generator, scanner)
 - [Lifecycle](docs/lifecycle.md) — create → validate → generate → test → scan → improve
 - [Template Spec](docs/template-spec.md) — full frontmatter reference and naming conventions
+- [Eval](docs/eval.md) — skill quality measurement (golden scenarios, three layers)
+- [Optimize](docs/optimize.md) — harness optimization (token cost, redundancy, invocation reliability)
 - [Examples](examples/) — real templates you can copy and use immediately
 
 ## Upgrade

@@ -9,7 +9,7 @@
 #     Layer 3: Human calibration (manual review queue)
 #
 # Usage:
-#   eval.sh [skill-name] [--layer 1|2|3] [--json] [--quiet]
+#   eval.sh [skill-name] [--layer 1|2|3] [--json] [--quiet] [--output FILE]
 #
 # Options:
 #   skill-name   Run evals for one skill only (default: all)
@@ -17,10 +17,16 @@
 #   --json       Output results as structured JSON
 #   --quiet      Suppress human-readable output (exit code only)
 #   --verbose    Show assertion details even on pass
+#   --output F   Score content of FILE instead of scenario body text.
+#                Use to validate real skill output captured from a run.
+#                When set, all scenarios for the target skill are scored
+#                against this output (one file, many assertions).
+#   --ci         Exit 1 on ANY regression from previous run. Reads
+#                last result from .zet/eval-baseline.json if present.
 #
 # Exit codes:
-#   0 — all scenarios pass
-#   1 — one or more scenarios fail
+#   0 — all scenarios pass (or no regression in --ci mode)
+#   1 — one or more scenarios fail (or regression detected)
 #   2 — no eval scenarios found
 #
 # Dependencies: bash, grep, awk, python3 (JSON output)
@@ -52,6 +58,12 @@
 #   ---
 #   (input/context below frontmatter — passed to the skill as simulated input)
 #
+# Continuous eval pattern:
+#   1. Skill runs, output captured to a file
+#   2. `zet eval skill-name --output /path/to/output.txt --json`
+#   3. Score appended to metrics for trend tracking
+#   4. Regression detected → triggers improvement pass
+#
 set -eo pipefail
 
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
@@ -69,17 +81,27 @@ MAX_LAYER=1
 JSON_MODE=false
 QUIET=false
 VERBOSE=false
+OUTPUT_FILE=""
+CI_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --layer)  MAX_LAYER="$2"; shift 2 ;;
-        --json)   JSON_MODE=true; shift ;;
-        --quiet)  QUIET=true; shift ;;
+        --layer)   MAX_LAYER="$2"; shift 2 ;;
+        --json)    JSON_MODE=true; shift ;;
+        --quiet)   QUIET=true; shift ;;
         --verbose) VERBOSE=true; shift ;;
-        --*)      echo "Unknown option: $1" >&2; exit 1 ;;
-        *)        TARGET_SKILL="$1"; shift ;;
+        --output)  OUTPUT_FILE="$2"; shift 2 ;;
+        --ci)      CI_MODE=true; JSON_MODE=true; QUIET=true; shift ;;
+        --*)       echo "Unknown option: $1" >&2; exit 1 ;;
+        *)         TARGET_SKILL="$1"; shift ;;
     esac
 done
+
+# Validate --output file exists
+if [ -n "$OUTPUT_FILE" ] && [ ! -f "$OUTPUT_FILE" ]; then
+    echo "Error: output file not found: $OUTPUT_FILE" >&2
+    exit 1
+fi
 
 # --- Validation ---
 if [ ! -d "$EVAL_DIR" ]; then
@@ -100,7 +122,7 @@ run_assertion() {
 
     case "$type" in
         contains)
-            if echo "$output" | grep -qF "$value"; then
+            if echo "$output" | grep -qF -- "$value"; then
                 return 0
             else
                 echo "expected to contain: '$value'"
@@ -108,7 +130,7 @@ run_assertion() {
             fi
             ;;
         not_contains)
-            if ! echo "$output" | grep -qF "$value"; then
+            if ! echo "$output" | grep -qF -- "$value"; then
                 return 0
             else
                 echo "expected NOT to contain: '$value'"
@@ -116,7 +138,7 @@ run_assertion() {
             fi
             ;;
         regex)
-            if echo "$output" | grep -qE "$value"; then
+            if echo "$output" | grep -qE -- "$value"; then
                 return 0
             else
                 echo "expected to match regex: '$value'"
@@ -124,7 +146,7 @@ run_assertion() {
             fi
             ;;
         not_regex)
-            if ! echo "$output" | grep -qE "$value"; then
+            if ! echo "$output" | grep -qE -- "$value"; then
                 return 0
             else
                 echo "expected NOT to match regex: '$value'"
@@ -271,8 +293,12 @@ for skill_dir in "${eval_dirs[@]}"; do
 
         # Layer 1: deterministic assertions
         if [ "$scenario_layer" -le 1 ]; then
-            # Get input and run assertions against it
-            input=$(get_scenario_input "$scenario")
+            # Score against --output file if provided, else use scenario body
+            if [ -n "$OUTPUT_FILE" ]; then
+                input=$(cat "$OUTPUT_FILE")
+            else
+                input=$(get_scenario_input "$scenario")
+            fi
             scenario_passed=true
             fail_details=""
 
@@ -301,6 +327,37 @@ for skill_dir in "${eval_dirs[@]}"; do
     done
 done
 
+# --- CI mode: baseline comparison (runs before output, updates baseline file) ---
+CI_EXIT_CODE=""
+if $CI_MODE; then
+    BASELINE_FILE="$ZET_ROOT/.zet/eval-baseline.json"
+    PASS_RATE=0
+    if [ "$TOTAL" -gt 0 ]; then
+        PASS_RATE=$(python3 -c "print(round($PASSED / $TOTAL * 100, 1))")
+    fi
+
+    regression=false
+    if [ -f "$BASELINE_FILE" ]; then
+        prev_rate=$(python3 -c "import json; print(json.load(open('$BASELINE_FILE')).get('pass_rate', 0))")
+        if python3 -c "exit(0 if $PASS_RATE < $prev_rate else 1)" 2>/dev/null; then
+            regression=true
+        fi
+    fi
+
+    mkdir -p "$ZET_ROOT/.zet"
+    python3 -c "
+import json
+data = {'pass_rate': $PASS_RATE, 'passed': $PASSED, 'failed': $FAILED, 'total': $TOTAL, 'timestamp': '$(date -u +%Y-%m-%dT%H:%M:%SZ)'}
+with open('$BASELINE_FILE', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+    if $regression; then
+        echo "{\"regression\": true, \"previous_rate\": $prev_rate, \"current_rate\": $PASS_RATE}" >&2
+        CI_EXIT_CODE=1
+    fi
+fi
+
 # --- Output ---
 if $JSON_MODE; then
     python3 - "${RESULTS[@]}" <<'PYEOF'
@@ -321,6 +378,9 @@ print(json.dumps({
     "results": results
 }, indent=2))
 PYEOF
+    if [ -n "$CI_EXIT_CODE" ]; then
+        exit "$CI_EXIT_CODE"
+    fi
     exit "$( [ "$FAILED" -eq 0 ] && echo 0 || echo 1 )"
 fi
 

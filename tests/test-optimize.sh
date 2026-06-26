@@ -154,6 +154,64 @@ assert_contains_str "$output" "tiny_prompt_template" "includes tiny skill"
 assert_contains_str "$output" "large_prompt_template" "includes large skill"
 teardown
 
+# Test 5b: Invocation reliability — strong description likely to fire
+echo ""
+echo "--- Invocation reliability: strong description ---"
+setup
+cat > "$ZET_TEMPLATES/strong_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Generate a sprint report with status updates and blockers. Use when the user says "sprint report" or asks for team progress across JIRA tickets.
+---
+# Strong
+Use Read to gather ticket data.
+EOF
+output=$(run_optimize_json)
+assert_contains_str "$output" '"invocation_reliability"' "reports invocation reliability section"
+assert_contains_str "$output" '"reliability": "likely"' "strong description scored likely"
+teardown
+
+# Test 5c: Invocation reliability — vague description unlikely to fire
+echo ""
+echo "--- Invocation reliability: vague description ---"
+setup
+cat > "$ZET_TEMPLATES/vague_prompt_template.md" <<'EOF'
+---
+type: skill
+description: A helper skill
+---
+# Vague
+Use Read to look at files.
+EOF
+output=$(run_optimize_json)
+assert_contains_str "$output" '"reliability": "unlikely"' "vague description scored unlikely"
+teardown
+
+# Test 5d: Invocation reliability — overlapping descriptions flagged ambiguous
+echo ""
+echo "--- Invocation reliability: ambiguous overlap ---"
+setup
+cat > "$ZET_TEMPLATES/dup_one_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Use when the user wants to review a pull request and check code quality for bugs and style issues.
+---
+# Dup One
+Use Read.
+EOF
+cat > "$ZET_TEMPLATES/dup_two_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Use when the user wants to review a pull request and check code quality for bugs and style issues.
+---
+# Dup Two
+Use Read.
+EOF
+output=$(run_optimize_json)
+assert_contains_str "$output" '"ambiguous_with"' "reports ambiguous overlap field"
+assert_contains_str "$output" "dup_two_prompt_template" "names the overlapping sibling"
+teardown
+
 # Test 6: No templates — graceful empty output
 echo ""
 echo "--- Empty project: no templates ---"
