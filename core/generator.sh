@@ -170,11 +170,16 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
 
     [ -z "$type" ] && continue
 
-    # Duplicate check
-    if echo "$seen_names" | grep -qw "$name"; then
-        echo "  ERROR: duplicate name '$name' — skipping" >&2
-        continue
-    fi
+    # Duplicate check — exact whole-token match against the space-joined list.
+    # NOT `grep -w`: with -w a hyphen counts as a word boundary, so "understand"
+    # falsely matches inside "understand-topic-para" (likewise team/team-retro,
+    # write/write-book-content) and the shorter skill is silently skipped.
+    case " $seen_names " in
+        *" $name "*)
+            echo "  ERROR: duplicate name '$name' — skipping" >&2
+            continue
+            ;;
+    esac
     seen_names="$seen_names $name"
 
     case "$type" in
