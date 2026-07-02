@@ -32,6 +32,22 @@ run_optimize_json() {
     bash "$OPTIMIZE" --json 2>&1
 }
 
+run_optimize_fix_dryrun() {
+    bash "$OPTIMIZE" --fix-descriptions --dry-run 2>&1 < /dev/null || true
+}
+
+run_optimize_fix() {
+    bash "$OPTIMIZE" --fix-descriptions --quiet 2>&1 < /dev/null || true
+}
+
+run_optimize_fix_json_dryrun() {
+    bash "$OPTIMIZE" --json --fix-descriptions --dry-run 2>&1 < /dev/null || true
+}
+
+run_optimize_fix_noargs() {
+    bash "$OPTIMIZE" --fix-descriptions 2>&1 < /dev/null || true
+}
+
 # --- Tests ---
 
 echo "=== Test: zet optimize ==="
@@ -276,6 +292,99 @@ EOF
 output=$(run_optimize_json)
 assert_not_contains_str "$output" "/Users/" "no hardcoded user paths"
 assert_not_contains_str "$output" "/home/" "no hardcoded home paths"
+teardown
+
+# Test 8: --fix-descriptions dry-run — shows proposed fix without writing
+echo ""
+echo "--- Fix descriptions: dry-run shows proposal ---"
+setup
+cat > "$ZET_TEMPLATES/vague_fix_prompt_template.md" <<'EOF'
+---
+type: skill
+description: A helper skill
+---
+# Vague
+Use Read to look at files.
+EOF
+output=$(run_optimize_fix_dryrun)
+assert_contains_str "$output" "before:" "shows original description"
+assert_contains_str "$output" "after:" "shows proposed description"
+assert_contains_str "$output" "Use when" "proposed description contains trigger phrase"
+assert_contains_str "$output" "dry-run" "indicates dry-run (no write)"
+original=$(grep 'description:' "$ZET_TEMPLATES/vague_fix_prompt_template.md")
+assert_contains_str "$original" "A helper skill" "file not modified in dry-run"
+teardown
+
+# Test 9: --fix-descriptions writes in-place and result is longer + has trigger phrase
+echo ""
+echo "--- Fix descriptions: rewrites file in-place ---"
+setup
+cat > "$ZET_TEMPLATES/weak_skill_prompt_template.md" <<'EOF'
+---
+type: skill
+description: A thing
+---
+# Weak
+Use Bash to do stuff.
+EOF
+run_optimize_fix
+new_desc=$(grep 'description:' "$ZET_TEMPLATES/weak_skill_prompt_template.md")
+assert_contains_str "$new_desc" "Use when" "rewritten description has trigger phrase"
+assert_not_contains_str "$new_desc" '"A thing"' "original weak description replaced"
+teardown
+
+# Test 10: --fix-descriptions is idempotent — running twice doesn't double-append
+echo ""
+echo "--- Fix descriptions: idempotent ---"
+setup
+cat > "$ZET_TEMPLATES/idempotent_skill_prompt_template.md" <<'EOF'
+---
+type: skill
+description: A thing
+---
+# Idempotent
+Use Read.
+EOF
+run_optimize_fix
+desc_after_first=$(grep 'description:' "$ZET_TEMPLATES/idempotent_skill_prompt_template.md")
+run_optimize_fix
+desc_after_second=$(grep 'description:' "$ZET_TEMPLATES/idempotent_skill_prompt_template.md")
+assert_contains_str "$desc_after_first" "$desc_after_second" "description unchanged after second run"
+teardown
+
+# Test 11: --fix-descriptions JSON output includes fix_descriptions field
+echo ""
+echo "--- Fix descriptions: JSON includes fix_descriptions section ---"
+setup
+cat > "$ZET_TEMPLATES/json_fix_prompt_template.md" <<'EOF'
+---
+type: skill
+description: A helper
+---
+# Json
+Use Read.
+EOF
+output=$(run_optimize_fix_json_dryrun)
+assert_contains_str "$output" '"fix_descriptions"' "JSON includes fix_descriptions section"
+assert_contains_str "$output" '"dry_run": true' "JSON reports dry_run true"
+teardown
+
+# Test 12: --fix-descriptions skips already-strong descriptions
+echo ""
+echo "--- Fix descriptions: skips already-likely descriptions ---"
+setup
+cat > "$ZET_TEMPLATES/strong_noop_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Use when the user asks for a sprint report with JIRA ticket status updates.
+---
+# Strong
+Use Read to gather data.
+EOF
+output=$(run_optimize_fix_noargs)
+assert_contains_str "$output" "nothing to fix" "reports nothing to fix for strong description"
+desc_unchanged=$(grep 'description:' "$ZET_TEMPLATES/strong_noop_prompt_template.md")
+assert_contains_str "$desc_unchanged" "Use when the user asks for a sprint report" "strong description not modified"
 teardown
 
 zet_test_results

@@ -13,17 +13,23 @@
 #      Scored deterministically from the description: trigger-phrase presence,
 #      length band, and cross-skill overlap (overlap = the agent can't
 #      disambiguate = low invocation).
+#   5. --fix-descriptions — auto-rewrite weak descriptions in-place.
+#      For each unlikely-to-fire skill, generates a stronger description
+#      deterministically: injects a trigger phrase + keywords from the skill name.
+#      Emits a diff before writing. Pass --dry-run to preview without writing.
 #
 #   Unlike doctor (which finds broken things), optimize finds inefficiencies
 #   and security over-exposure in working configurations.
 #
 # Usage:
-#   optimize.sh [--json] [--quiet] [--verbose]
+#   optimize.sh [--json] [--quiet] [--verbose] [--fix-descriptions [--dry-run]]
 #
 # Options:
-#   --json     Output as structured JSON
-#   --quiet    Exit code only (0=optimized, 1=opportunities found)
-#   --verbose  Show per-skill detail even when no issues
+#   --json              Output as structured JSON
+#   --quiet             Exit code only (0=optimized, 1=opportunities found)
+#   --verbose           Show per-skill detail even when no issues
+#   --fix-descriptions  Rewrite descriptions for unlikely-to-fire skills in-place
+#   --dry-run           Preview --fix-descriptions output without writing (requires --fix-descriptions)
 #
 # Exit codes:
 #   0 — no optimization opportunities (or informational only)
@@ -43,13 +49,17 @@ TEMPLATE_DIR="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templat
 JSON_MODE=false
 QUIET=false
 VERBOSE=false
-BUDGET=""   # if set (--budget N), exit non-zero when always-loaded tokens exceed N
+BUDGET=""           # if set (--budget N), exit non-zero when always-loaded tokens exceed N
+FIX_DESCRIPTIONS=false
+DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --json)    JSON_MODE=true; shift ;;
-        --quiet)   QUIET=true; shift ;;
-        --verbose) VERBOSE=true; shift ;;
-        --budget)  BUDGET="$2"; shift 2 ;;
+        --json)               JSON_MODE=true; shift ;;
+        --quiet)              QUIET=true; shift ;;
+        --verbose)            VERBOSE=true; shift ;;
+        --budget)             BUDGET="$2"; shift 2 ;;
+        --fix-descriptions)   FIX_DESCRIPTIONS=true; shift ;;
+        --dry-run)            DRY_RUN=true; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -84,6 +94,7 @@ ALL_TOOLS="Bash|Write|Edit|Read|Grep|Glob|Agent|WebFetch|WebSearch|NotebookEdit|
 # --- Analysis ---
 
 declare -a SKILL_NAMES=()
+declare -a SKILL_FILES=()
 declare -a SKILL_TOOLS=()
 declare -a SKILL_RISKS=()
 declare -a SKILL_TOKENS=()
@@ -110,6 +121,7 @@ if [ -d "$TEMPLATE_DIR" ]; then
         TOTAL_SKILLS=$((TOTAL_SKILLS + 1))
         name=$(basename "$file" .md)
         SKILL_NAMES+=("$name")
+        SKILL_FILES+=("$file")
 
         # Get body (after frontmatter)
         body=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2{print}' "$file")
@@ -274,6 +286,113 @@ PYEOF
 fi
 AMBIGUOUS_PAIRS=${AMBIGUOUS_PAIRS:-"[]"}
 
+# --- 5. Fix descriptions (--fix-descriptions) ---
+# For each skill scored "unlikely", generate a stronger description
+# deterministically: inject a trigger phrase + keywords derived from the
+# skill name (slug → words → sentence). Write back to the template file
+# (or preview with --dry-run). Only touches the description: line in the
+# YAML frontmatter — all other content is preserved byte-for-byte.
+FIX_COUNT=0
+if $FIX_DESCRIPTIONS; then
+    # Build ambiguous set once (ambiguous skills need disambiguation suffix)
+    ambiguous_skills=""
+    if [ "$AMBIGUOUS_PAIRS" != "[]" ]; then
+        ambiguous_skills=$(echo "$AMBIGUOUS_PAIRS" | python3 -c "
+import sys, json
+pairs = json.load(sys.stdin)
+seen = set()
+for p in pairs:
+    seen.add(p['skill_a']); seen.add(p['skill_b'])
+print(' '.join(sorted(seen)))
+" 2>/dev/null || true)
+    fi
+
+    for i in "${!SKILL_NAMES[@]}"; do
+        if [ "${SKILL_RELIABILITY[$i]}" != "unlikely" ]; then
+            continue
+        fi
+
+        skill_name="${SKILL_NAMES[$i]}"
+        skill_file="${SKILL_FILES[$i]}"
+        old_desc=$(get_frontmatter_value "$skill_file" "description")
+
+        # Derive a keyword phrase from the skill filename:
+        # "my_skill_prompt_template" → "my skill" (drop _prompt_template, replace _ with space)
+        keyword_phrase=$(echo "$skill_name" \
+            | sed 's/_prompt_template$//' \
+            | tr '_-' '  ' \
+            | sed 's/  */ /g' \
+            | sed 's/^ //;s/ $//')
+
+        # Check if this skill is in the ambiguous set — if so, add a
+        # differentiation suffix using words from its own body
+        disambig_suffix=""
+        if echo " $ambiguous_skills " | grep -qF " $skill_name "; then
+            body_words=$(echo "${SKILL_BODIES[$i]}" \
+                | tr -cs 'a-zA-Z' ' ' \
+                | tr ' ' '\n' \
+                | awk 'length>4' \
+                | sort | uniq -c | sort -rn \
+                | awk 'NR<=3{print $2}' \
+                | tr '\n' ' ' \
+                | sed 's/ $//')
+            [ -n "$body_words" ] && disambig_suffix=" (specifically: $body_words)"
+        fi
+
+        # Compose rewritten description
+        new_desc="Use when the user wants to ${keyword_phrase}${disambig_suffix}."
+        # Ensure minimum length — if still short, append the keyword phrase again
+        while [ "${#new_desc}" -lt "$RELIABILITY_MIN_LEN" ]; do
+            new_desc="${new_desc} Triggers on: ${keyword_phrase}."
+        done
+
+        # Skip if old and new are the same (idempotency)
+        if [ "$old_desc" = "$new_desc" ]; then
+            continue
+        fi
+
+        FIX_COUNT=$((FIX_COUNT + 1))
+
+        if ! $QUIET; then
+            echo "  fix: $skill_name"
+            echo "    before: $old_desc"
+            echo "    after:  $new_desc"
+        fi
+
+        if ! $DRY_RUN; then
+            # Rewrite just the description: line in-place.
+            # Uses -c to avoid reading stdin (heredoc would consume parent stdin when
+            # optimize.sh is run as a bare bash command rather than in a subshell).
+            python3 -c "
+import sys, re
+path = sys.argv[1]
+new_val = sys.argv[2]
+content = open(path).read()
+parts = content.split('---', 2)
+if len(parts) >= 3:
+    pre, fm, body = parts
+    fm_new = re.sub(
+        r'^(description:\s*).*',
+        lambda m: m.group(1) + new_val,
+        fm, flags=re.MULTILINE, count=1,
+    )
+    open(path, 'w').write(pre + '---' + fm_new + '---' + body)
+    print(f'wrote: {path}')
+" "$skill_file" "$new_desc"
+        fi
+    done
+
+    if ! $QUIET && [ "$FIX_COUNT" -eq 0 ]; then
+        echo "  No unlikely-to-fire descriptions found — nothing to fix."
+    fi
+    if ! $QUIET && $DRY_RUN && [ "$FIX_COUNT" -gt 0 ]; then
+        echo "  (dry-run — no files written)"
+    fi
+    if ! $QUIET && ! $DRY_RUN && [ "$FIX_COUNT" -gt 0 ]; then
+        echo "  $FIX_COUNT description(s) rewritten. Run 'zet generate' to regenerate skill files."
+    fi
+fi
+
 # --- Token budget (always-loaded vs on-demand) ---
 # Always-loaded also includes the full CLAUDE.md + everything in rules/ (read every session),
 # on top of the per-skill frontmatter summed in the loop. Missing files contribute 0 (graceful).
@@ -325,7 +444,8 @@ if $JSON_MODE; then
     printf '%s' "$skills_data" | ZET_REDUNDANCY_JSON="$REDUNDANCY_PAIRS" ZET_AMBIGUOUS_JSON="$AMBIGUOUS_PAIRS" \
         ZET_ALWAYS_LOADED_TOKENS="$ALWAYS_LOADED_TOKENS" ZET_ON_DEMAND_TOKENS="$ON_DEMAND_TOKENS" \
         ZET_ALWAYS_LOADED_PCT="$ALWAYS_LOADED_PCT_STR" ZET_CONTEXT_WINDOW="$CONTEXT_WINDOW" \
-        ZET_BUDGET="$BUDGET" ZET_OVER_BUDGET="$OVER_BUDGET" python3 -c "
+        ZET_BUDGET="$BUDGET" ZET_OVER_BUDGET="$OVER_BUDGET" \
+        ZET_FIX_COUNT="$FIX_COUNT" ZET_FIX_MODE="$FIX_DESCRIPTIONS" ZET_DRY_RUN="$DRY_RUN" python3 -c "
 import sys, json, os
 
 lines = [l for l in sys.stdin.read().strip().split('\n') if l]
@@ -367,14 +487,20 @@ if budget_env:
     token_budget['budget'] = int(budget_env)
     token_budget['over_budget'] = os.environ.get('ZET_OVER_BUDGET', 'false') == 'true'
 
-print(json.dumps({
+out = {
     'total_skills': len(lines),
     'permissions': permissions,
     'token_costs': token_costs,
     'redundancy': redundancy,
     'invocation_reliability': invocation_reliability,
-    'token_budget': token_budget
-}, indent=2))
+    'token_budget': token_budget,
+}
+if os.environ.get('ZET_FIX_MODE', 'false') == 'true':
+    out['fix_descriptions'] = {
+        'fixed': int(os.environ.get('ZET_FIX_COUNT', '0')),
+        'dry_run': os.environ.get('ZET_DRY_RUN', 'false') == 'true',
+    }
+print(json.dumps(out, indent=2))
 "
     # Budget gate applies in JSON mode too: over budget → non-zero exit for CI.
     $OVER_BUDGET && exit 1
@@ -448,7 +574,11 @@ for p in json.load(sys.stdin):
     print(f\"    {p['skill_a']} <-> {p['skill_b']} (similarity {p['similarity']})\")
 " 2>/dev/null | while IFS= read -r line; do $QUIET || echo "$line"; done
     fi
-    $QUIET || echo "  Fix: add a 'Use when…' trigger and specifics, or merge/retire overlapping skills."
+    if $FIX_DESCRIPTIONS; then
+        $QUIET || echo "  Run --fix-descriptions to auto-rewrite (already applied if no --dry-run)."
+    else
+        $QUIET || echo "  Fix: add a 'Use when…' trigger and specifics, or run --fix-descriptions to auto-rewrite."
+    fi
 elif $VERBOSE; then
     $QUIET || echo "  All descriptions carry a trigger phrase — likely to fire."
 fi
