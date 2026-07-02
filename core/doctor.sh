@@ -34,6 +34,7 @@
 #   7. Secret detection (API keys, tokens in templates)
 #   8. Codex health (if ~/.codex/ exists)
 #   9. Token bomb detection (unbounded Agent fan-out in templates)
+#  10. Backend health probing (runtime checks of external dependencies)
 #
 # Configuration via environment or zet.toml:
 #   ZET_ROOT, ZET_TEMPLATES, ZET_SKILLS, ZET_AGENTS, ZET_RULES
@@ -264,8 +265,67 @@ if [ -d "$CODEX_DIR" ]; then
     fi
 fi
 
+# --- 10. Backend health probing (runtime checks of external dependencies) ---
+# Probes commands with a lightweight check (--version or similar) and classifies:
+#   ok      — found and responds correctly
+#   missing — not on PATH
+#   broken  — on PATH but errors when executed
+#   timeout — found but did not respond within PROBE_TIMEOUT seconds
+#
+# Config: [doctor].probe-commands = "gh:gh --version,jira:jira --version,..."
+# Default: common developer tools that agent harnesses depend on
+declare -a PROBE_ISSUES=()
+PROBE_TIMEOUT="${ZET_PROBE_TIMEOUT:-3}"
+PROBE_COMMANDS="${ZET_PROBE_COMMANDS:-$(zet_config_get "doctor" "probe-commands" "")}"
+
+# Default probes when none configured — minimal set that agent harnesses commonly need
+if [ -z "$PROBE_COMMANDS" ]; then
+    PROBE_COMMANDS="gh:gh --version,python3:python3 --version,node:node --version,git:git --version"
+fi
+
+probe_command() {
+    local name="$1" cmd="$2"
+    # Check if base command exists
+    local base_cmd
+    base_cmd=$(echo "$cmd" | awk '{print $1}')
+    if ! command -v "$base_cmd" >/dev/null 2>&1; then
+        PROBE_ISSUES+=("$name:missing (not on PATH)")
+        return
+    fi
+    # Execute with timeout
+    local output exit_code
+    if command -v timeout >/dev/null 2>&1; then
+        output=$(timeout "$PROBE_TIMEOUT" bash -c "$cmd" 2>&1) || exit_code=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+        output=$(gtimeout "$PROBE_TIMEOUT" bash -c "$cmd" 2>&1) || exit_code=$?
+    else
+        # Fallback: run without timeout
+        output=$(bash -c "$cmd" 2>&1) || exit_code=$?
+        exit_code=${exit_code:-0}
+    fi
+    exit_code=${exit_code:-0}
+    # Exit code 124 = timeout (GNU coreutils), 137 = killed (macOS)
+    if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 137 ]; then
+        PROBE_ISSUES+=("$name:timeout (no response in ${PROBE_TIMEOUT}s)")
+    elif [ "$exit_code" -ne 0 ]; then
+        PROBE_ISSUES+=("$name:broken (exit $exit_code)")
+    fi
+    # exit 0 = ok, no issue added
+}
+
+IFS=',' read -ra probes <<< "$PROBE_COMMANDS"
+for probe_entry in "${probes[@]}"; do
+    # Format: name:command (e.g. "gh:gh --version")
+    probe_entry=$(echo "$probe_entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -z "$probe_entry" ] && continue
+    probe_name="${probe_entry%%:*}"
+    probe_cmd="${probe_entry#*:}"
+    [ -z "$probe_cmd" ] && continue
+    probe_command "$probe_name" "$probe_cmd"
+done
+
 # --- Output ---
-TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} + ${#TOKEN_BOMBS[@]} ))
+TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} + ${#TOKEN_BOMBS[@]} + ${#PROBE_ISSUES[@]} ))
 
 if $JSON_MODE; then
     to_json() {
@@ -283,6 +343,7 @@ if $JSON_MODE; then
         "$(to_json "${SECRET_HITS[@]}")" \
         "$(to_json "${CODEX_ISSUES[@]}")" \
         "$(to_json "${TOKEN_BOMBS[@]}")" \
+        "$(to_json "${PROBE_ISSUES[@]}")" \
         <<'PYEOF'
 import json, sys
 print(json.dumps({
@@ -296,6 +357,7 @@ print(json.dumps({
     "secret_hits": json.loads(sys.argv[7]),
     "codex_issues": json.loads(sys.argv[8]),
     "token_bombs": json.loads(sys.argv[9]),
+    "probe_issues": json.loads(sys.argv[10]),
 }, indent=2))
 PYEOF
     exit 0
@@ -355,6 +417,12 @@ fi
 if [ ${#TOKEN_BOMBS[@]} -gt 0 ]; then
     $QUIET || echo "--- Token Bomb Risk (${#TOKEN_BOMBS[@]}) ---"
     for item in "${TOKEN_BOMBS[@]}"; do $QUIET || echo "  - $item"; done
+    $QUIET || echo ""
+fi
+
+if [ ${#PROBE_ISSUES[@]} -gt 0 ]; then
+    $QUIET || echo "--- Backend Health Probes (${#PROBE_ISSUES[@]}) ---"
+    for item in "${PROBE_ISSUES[@]}"; do $QUIET || echo "  - $item"; done
     $QUIET || echo ""
 fi
 

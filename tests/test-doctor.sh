@@ -352,4 +352,80 @@ output=$(run_doctor_json)
 assert_contains_str "$output" "separator_prompt_template.md" "detects fan-out after --- in body"
 teardown
 
+# Test 19: Backend probe — missing command detected
+echo ""
+echo "--- Backend probe: missing command ---"
+setup
+export HOME="$TEST_HOME"
+export ZET_PROBE_COMMANDS="fakecmd:fakecmd_nonexistent_xyz --version"
+cat > "$ZET_TEMPLATES/probe_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Probe test
+---
+# Content
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" "fakecmd:missing" "detects missing backend command"
+teardown
+
+# Test 20: Backend probe — working command passes cleanly
+echo ""
+echo "--- Backend probe: working command ---"
+setup
+export HOME="$TEST_HOME"
+export ZET_PROBE_COMMANDS="bash:bash --version"
+cat > "$ZET_TEMPLATES/probe2_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Probe test 2
+---
+# Content
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" '"probe_issues": []' "working command has no probe issues"
+teardown
+
+# Test 21: Backend probe — broken command detected (exits nonzero)
+echo ""
+echo "--- Backend probe: broken command ---"
+setup
+export HOME="$TEST_HOME"
+# Create a command that exists but exits with error
+mkdir -p "$TEST_HOME/bin"
+cat > "$TEST_HOME/bin/broken_tool" <<'SCRIPT'
+#!/bin/bash
+exit 1
+SCRIPT
+chmod +x "$TEST_HOME/bin/broken_tool"
+export PATH="$TEST_HOME/bin:$PATH"
+export ZET_PROBE_COMMANDS="broken_tool:broken_tool --version"
+cat > "$ZET_TEMPLATES/probe3_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Probe test 3
+---
+# Content
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" "broken_tool:broken" "detects broken backend command"
+teardown
+
+# Test 22: Backend probe — empty config means default probes run
+echo ""
+echo "--- Backend probe: defaults ---"
+setup
+export HOME="$TEST_HOME"
+unset ZET_PROBE_COMMANDS
+cat > "$ZET_TEMPLATES/defaults_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Default probes
+---
+# Content
+EOF
+output=$(run_doctor_json)
+assert_contains_str "$output" '"probe_issues"' "probe_issues key present with defaults"
+teardown
+
 zet_test_results
