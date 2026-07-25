@@ -15,6 +15,36 @@
 #   ZET_MODEL_ROLES  — model-roles config file path
 set -e
 
+# --- Concurrency lock ---
+# Multiple sessions can invoke `zet generate` at nearly the same moment (e.g. several Claude Code sessions
+# sharing this vault). Without serialization, two runs interleave on the same wipe-then-write output dirs —
+# one run's wipe can land between another run's write, leaving a near-empty result (observed: skills-local
+# dropped from 65 entries to 1 stray "another" dir mid-write). Serialize with an mkdir-based lock (atomic on
+# every POSIX filesystem, no external binary needed — `flock` isn't installed by default on macOS): a second
+# run WAITS for the first to release rather than racing it.
+#
+# STRICTLY OWNERSHIP-SCOPED (no steal/steal-race): the release trap is set ONLY after THIS process's own
+# mkdir succeeds, so only the actual lock holder can ever remove it — no other waiter can double-unlock or
+# steal it. There is deliberately NO "steal a stale lock after N seconds" fallback: an earlier version tried
+# that and it was UNSOUND (two waiters could both believe they'd reclaimed the lock and proceed concurrently,
+# recreating the exact race this lock exists to prevent). generate normally finishes in seconds, so a hung
+# holder is abnormal; if the wait exceeds the timeout, fail LOUDLY with manual-recovery instructions rather
+# than silently risk corrupting output by racing another process.
+_LOCKDIR="${TMPDIR:-/tmp}/zet-generate.lock"
+_LOCK_WAITED=0
+_LOCK_TIMEOUT_S=120
+while ! mkdir "$_LOCKDIR" 2>/dev/null; do
+    _LOCK_WAITED=$((_LOCK_WAITED + 1))
+    if [ "$_LOCK_WAITED" -ge "$_LOCK_TIMEOUT_S" ]; then
+        echo "ERROR: zet generate lock held >${_LOCK_TIMEOUT_S}s by another run." >&2
+        echo "  If that run crashed without cleanup (e.g. kill -9), remove the stale lock manually: rmdir $_LOCKDIR" >&2
+        exit 1
+    fi
+    sleep 1
+done
+# Reached ONLY by the process whose mkdir just succeeded — safe to bind the release trap here.
+trap 'rmdir "$_LOCKDIR" 2>/dev/null || true' EXIT
+
 # --- Config resolution ---
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -26,6 +56,12 @@ TEMPLATE_DIR="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templat
 SKILLS_DIR="$(resolve_path "${ZET_SKILLS:-$(zet_config_get "paths" "skills" "$HOME/.claude/skills")}")"
 AGENTS_DIR="$(resolve_path "${ZET_AGENTS:-$(zet_config_get "paths" "agents" "$HOME/.claude/agents")}")"
 RULES_DIR="$(resolve_path "${ZET_RULES:-$(zet_config_get "paths" "rules" "$HOME/.claude/rules")}")"
+# LOCAL-TIER skill output — a dual-tier copy for a local-model session (any OpenClaude/Ollama-backed client).
+# Every skill lands here by default, with its role: resolved through the LOCAL model column, UNLESS its
+# template opts out with `tier: full-only`. A local-model client points --plugin-dir at this dir so it can run
+# the same skills as the full-Claude session. Default location beside the full set; override via
+# ZET_SKILLS_LOCAL / [paths].skills-local.
+SKILLS_LOCAL_DIR="$(resolve_path "${ZET_SKILLS_LOCAL:-$(zet_config_get "paths" "skills-local" "$HOME/.claude/skills-local")}")"
 # Agent Skills Open Standard output (interop with Codex, Cursor, Gemini CLI, etc.)
 _agents_std_raw="${ZET_AGENTS_STD:-$(zet_config_get "paths" "agents-std" "")}"
 AGENTS_STD_DIR=""
@@ -85,6 +121,29 @@ resolve_model_role() {
         return 0
     fi
     return 1
+}
+
+resolve_model_role_local() {
+    # Resolve a role through the LOCAL column: try {role}_local first, fall back to the base role ONLY IF that
+    # base value is itself local. FAIL CLOSED — the invariant is "local tier never emits a cloud model." A base
+    # role like cheap_cloud=deepseek/... or execute=sonnet must NOT leak into a local skill on fallback; if no
+    # local mapping resolves, emit nothing (the skill's model: line is omitted, so the local session default
+    # applies — never a cloud model). A value is "local" if it's a bare Ollama tag or ollama_chat/-prefixed
+    # (never a provider-slashed cloud id like deepseek/... or a claude-* name).
+    local role="$1" val
+    val=$(resolve_model_role "${role}_local" || true)
+    if [ -z "$val" ]; then
+        local base
+        base=$(resolve_model_role "$role" || true)
+        case "$base" in
+            ollama_chat/*)          val="$base" ;;                      # LiteLLM-form local — keep
+            claude-*|*/*)           val="" ;;                           # claude-… or provider/model cloud — DROP
+            opus|sonnet|haiku)      val="" ;;                           # bare Claude family alias is CLOUD — DROP
+            "" )                    val="" ;;
+            *)                      val="$base" ;;                      # bare non-Claude tag (qwen…) = local — keep
+        esac
+    fi
+    echo "$val"
 }
 
 generate_file() {
@@ -149,10 +208,59 @@ generate_file() {
 }
 
 # --- Ensure output dirs ---
+# SAFETY ABORT: the local-set wipe below deletes SKILL.md files under SKILLS_LOCAL_DIR. If a misconfig
+# (ZET_SKILLS_LOCAL / [paths].skills-local) or symlink drift ever resolved it to the SAME dir as the full
+# set, that wipe would destroy the full set before regeneration. Refuse to run rather than risk it. Compare
+# PHYSICAL paths when a dir exists (pwd -P resolves symlinks + normalization); for not-yet-created dirs,
+# compare the physical PARENT + basename so the guard also covers the equal-but-uncreated case (Codex: a
+# --dry run with equal uncreated dirs otherwise slipped past). Runs REGARDLESS of --dry (it's pure comparison).
+_canon_path() {
+    # Echo a comparable absolute path: physical dir if it exists, else physical(parent)/basename.
+    local p="$1"
+    if [ -d "$p" ]; then ( cd "$p" 2>/dev/null && pwd -P ); return; fi
+    local parent base
+    parent=$(dirname "$p"); base=$(basename "$p")
+    if [ -d "$parent" ]; then echo "$(cd "$parent" 2>/dev/null && pwd -P)/$base"; else echo "$p"; fi
+}
+# Guard BOTH the local plugin root AND the actual wipe target (its skills/ subdir) against the full skills
+# dir. The wipe deletes SKILL.md under $SKILLS_LOCAL_DIR/skills, so if skills-local were set to the PARENT
+# of the full dir (e.g. skills-local=~/.claude, skills=~/.claude/skills), the subdir would BE the full dir
+# and the wipe would destroy it — comparing only the roots misses that. Compare the resolved wipe target too.
+SKILLS_LOCAL_SKILLS_DIR="$SKILLS_LOCAL_DIR/skills"
+_phys_full=$(_canon_path "$SKILLS_DIR")
+_phys_local=$(_canon_path "$SKILLS_LOCAL_DIR")
+_phys_local_skills=$(_canon_path "$SKILLS_LOCAL_SKILLS_DIR")
+if [ -n "$_phys_full" ] && { [ "$_phys_full" = "$_phys_local" ] || [ "$_phys_full" = "$_phys_local_skills" ]; }; then
+    echo "ERROR: skills-local (or its skills/ subdir) resolves to the full skills dir ($_phys_full)." >&2
+    echo "  Refusing to run — the local-set wipe would delete the full skill set. Fix [paths].skills-local." >&2
+    exit 1
+fi
 ensure_dir "$SKILLS_DIR"
+ensure_dir "$SKILLS_LOCAL_DIR"
 ensure_dir "$AGENTS_DIR"
 ensure_dir "$RULES_DIR"
 [ -n "$AGENTS_STD_DIR" ] && ensure_dir "$AGENTS_STD_DIR"
+# The local set is emitted as a PLUGIN so a local-model client (ccl/openclaude) can load it via --plugin-dir
+# (openclaude discovers skills from <pluginroot>/skills/<name>/SKILL.md + a .claude-plugin/plugin.json
+# manifest — a bare skills dir is NOT loadable). Local skills live under $SKILLS_LOCAL_SKILLS_DIR (defined +
+# guarded against the full dir above); a manifest is written to $SKILLS_LOCAL_DIR/.claude-plugin/plugin.json.
+# REGENERATED fresh each run so a skill retagged full→local (or its template deleted) can never leave a stale
+# copy that ccl would still surface. Safe: only SKILL.md under the dedicated local plugin's skills/ subdir
+# (guarded above against $SKILLS_LOCAL_DIR ever being the full dir).
+if ! $DRY_RUN; then
+    ensure_dir "$SKILLS_LOCAL_SKILLS_DIR"
+    find "$SKILLS_LOCAL_SKILLS_DIR" -mindepth 1 -maxdepth 2 -name SKILL.md -delete 2>/dev/null || true
+    find "$SKILLS_LOCAL_SKILLS_DIR" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+    # emit the plugin manifest (idempotent — same content every run)
+    ensure_dir "$SKILLS_LOCAL_DIR/.claude-plugin"
+    cat > "$SKILLS_LOCAL_DIR/.claude-plugin/plugin.json" <<'PLUGINJSON'
+{
+  "name": "ccl-local",
+  "version": "0.1.0",
+  "description": "Local-tier skills (tier: local) for the ccl local-model session — generated by zet, do not edit."
+}
+PLUGINJSON
+fi
 
 # --- Generate ---
 skill_count=0
@@ -196,6 +304,15 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
             ctx=$(get_frontmatter_value "$file" "context")
             domain=$(get_frontmatter_value "$file" "domain")
             skill_tags=$(get_frontmatter_value "$file" "tags")
+            # TIER: which sets this skill belongs to. Default "local" — EVERY skill is exposed to a
+            # local-model session by default, using the SAME template with its role: resolved through the
+            # local model column. A heavy skill (one that fans out many cloud subagents) still appears in the
+            # local session rather than "Unknown skill" — if the local
+            # model genuinely can't carry it out, that surfaces as the model's own best-effort/limitation
+            # response, not a lookup failure. `tier: full-only` is the explicit opt-OUT for a skill that must
+            # never even be attempted locally (e.g. needs credentials/hooks only the full session has).
+            tier=$(get_frontmatter_value "$file" "tier")
+            [ -z "$tier" ] && tier="local"
 
             if [ -n "$role" ]; then
                 resolved=$(resolve_model_role "$role" || true)
@@ -262,6 +379,52 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
                 mkdir -p "$AGENTS_STD_DIR/$name"
                 cp "$skill_dir/SKILL.md" "$AGENTS_STD_DIR/$name/SKILL.md"
                 interop_count=$((interop_count + 1))
+            fi
+
+            # LOCAL-TIER set: only skills marked `tier: local` are ALSO emitted into SKILLS_LOCAL_DIR, with
+            # their model: resolved through the LOCAL column (Ollama), so a local-model client running this
+            # skill spawns local subagents instead of reaching for Anthropic. Same body, local model header.
+            if [ "$tier" = "local" ] && ! $DRY_RUN; then
+                # local_model must NEVER inherit the full/cloud $model — that's the leak. Start EMPTY and set
+                # it only to a value proven local: from the role's local column (fail-closed) when role is set,
+                # or from a directly-set model: only if that model is itself local (bare tag / ollama_chat/).
+                # Empty ⇒ the model: line is omitted below ⇒ the local session's own default applies (never cloud).
+                local_model=""
+                if [ -n "$role" ]; then
+                    local_model=$(resolve_model_role_local "$role" || true)
+                elif [ -n "$model" ]; then
+                    case "$model" in
+                        ollama_chat/*)      local_model="$model" ;;
+                        claude-*|*/*)       local_model="" ;;      # cloud id — DROP
+                        opus|sonnet|haiku)  local_model="" ;;      # bare Claude family alias is CLOUD — DROP
+                        *)                  local_model="$model" ;; # bare non-Claude tag = local
+                    esac
+                fi
+                local_skill_dir="$SKILLS_LOCAL_SKILLS_DIR/$name"
+                mkdir -p "$local_skill_dir"
+                {
+                    echo "---"
+                    echo "name: $name"
+                    echo "description: $desc"
+                    echo "user-invocable: true"
+                    [ -n "$args" ] && echo "argument-hint: \"$args\""
+                    [ -n "$local_model" ] && echo "model: $local_model"
+                    [ -n "$ctx" ] && echo "context: $ctx"
+                    [ -n "$domain" ] && echo "domain: $domain"
+                    [ -n "$skill_tags" ] && echo "tags: $skill_tags"
+                    echo "---"
+                    echo "<!-- Generated by Zet from $filename (LOCAL tier) — do not edit directly -->"
+                    echo "<!-- Regenerate: zet generate -->"
+                    echo ""
+                    printf 'follow %s\n' "$TEMPLATE_DIR/$filename"
+                    if [ -n "$prompt_extra" ]; then
+                        printf '%s' "$prompt_extra" | sed 's/\\n/\n/g'
+                        echo ""
+                    fi
+                    echo ""
+                    echo "Read the template file first, then execute its instructions completely."
+                } > "$local_skill_dir/SKILL.md"
+                $QUIET || echo "  skill: $name (+local)"
             fi
             ;;
 

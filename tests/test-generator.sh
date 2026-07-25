@@ -14,11 +14,21 @@ setup() {
     export ZET_ROOT="$TEST_HOME/project"
     export ZET_TEMPLATES="$ZET_ROOT/templates"
     export ZET_SKILLS="$TEST_HOME/output/skills"
+    # ZET_SKILLS_LOCAL isolated here for EVERY test (not just the tier-specific ones) — without this, any
+    # test that doesn't set it falls through to generator.sh's real default (~/.claude/skills-local) and the
+    # suite corrupts the USER's real local skill set on every run (a stray test-fixture dir ended up there
+    # after a suite run touched live output). Every test must be fully isolated, not just the ones that ask.
+    export ZET_SKILLS_LOCAL="$TEST_HOME/output/skills-local"
     export ZET_AGENTS="$TEST_HOME/output/agents"
     export ZET_RULES="$TEST_HOME/output/rules"
     export ZET_MODEL_ROLES="$ZET_ROOT/model-roles.conf"
+    # Isolate the generator's concurrency lock (${TMPDIR:-/tmp}/zet-generate.lock) to this test's own tmp dir
+    # so the test suite can never touch/rmdir a REAL zet generate lock if one happens to be held concurrently
+    # by an actual session using this vault.
+    export TMPDIR="$TEST_HOME/tmp"
+    mkdir -p "$TMPDIR"
 
-    mkdir -p "$ZET_TEMPLATES" "$ZET_SKILLS" "$ZET_AGENTS" "$ZET_RULES"
+    mkdir -p "$ZET_TEMPLATES" "$ZET_SKILLS" "$ZET_SKILLS_LOCAL" "$ZET_AGENTS" "$ZET_RULES"
 
     cat > "$ZET_MODEL_ROLES" <<'EOF'
 audit=haiku
@@ -251,6 +261,107 @@ EOF
 run_gen >/dev/null
 
 assert_dir_exists "$ZET_SKILLS/manual-skill" "manual skill preserved"
+teardown
+
+# Test 12: DEFAULT tier is local — a skill with no tier: field lands in BOTH the full set and the local-tier
+# plugin set (ccl should run all skills by default; tier: full-only is the explicit opt-out).
+echo ""
+echo "--- Default tier is local (no tier: field needed) ---"
+setup
+export ZET_SKILLS_LOCAL="$TEST_HOME/output/skills-local"
+mkdir -p "$ZET_SKILLS_LOCAL"
+cat > "$ZET_TEMPLATES/notier_prompt_template.md" <<'EOF'
+---
+type: skill
+role: execute
+description: no explicit tier
+---
+# No tier field
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/notier/SKILL.md" "no-tier skill still in full set"
+assert_file_exists "$ZET_SKILLS_LOCAL/skills/notier/SKILL.md" "no-tier skill DEFAULTS into the local set"
+assert_file_exists "$ZET_SKILLS_LOCAL/.claude-plugin/plugin.json" "local plugin manifest emitted"
+teardown
+
+# Test 13: tier: full-only opts a skill OUT of the local set (full set unaffected)
+echo ""
+echo "--- tier: full-only excludes a skill from the local set ---"
+setup
+export ZET_SKILLS_LOCAL="$TEST_HOME/output/skills-local"
+mkdir -p "$ZET_SKILLS_LOCAL"
+cat > "$ZET_TEMPLATES/fullonly_prompt_template.md" <<'EOF'
+---
+type: skill
+role: think
+tier: full-only
+description: must never appear locally
+---
+# Full-only
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/fullonly/SKILL.md" "full-only skill still in full set"
+assert_file_not_exists "$ZET_SKILLS_LOCAL/skills/fullonly/SKILL.md" "full-only skill excluded from local set"
+teardown
+
+# Test 14: concurrent generate runs never corrupt the local set (the multi-session race this lock fixes)
+echo ""
+echo "--- Concurrent zet generate runs serialize, never corrupt output ---"
+setup
+export ZET_SKILLS_LOCAL="$TEST_HOME/output/skills-local"
+mkdir -p "$ZET_SKILLS_LOCAL"
+cat > "$ZET_TEMPLATES/concur_prompt_template.md" <<'EOF'
+---
+type: skill
+role: execute
+description: concurrency probe
+---
+# Concur
+EOF
+for _ in 1 2 3; do run_gen >/dev/null & done
+wait
+assert_file_exists "$ZET_SKILLS_LOCAL/skills/concur/SKILL.md" "concurrent runs still produce the skill (no wipe-without-write corruption)"
+teardown
+
+# Test 15: the lock is STRICTLY ownership-scoped — a held lock actually BLOCKS a waiter (no steal), and the
+# waiter proceeds only once the real holder releases it.
+echo ""
+echo "--- Lock blocks a waiter until the real holder releases (no steal) ---"
+setup
+export ZET_SKILLS_LOCAL="$TEST_HOME/output/skills-local"
+mkdir -p "$ZET_SKILLS_LOCAL"
+_LOCKDIR="${TMPDIR:-/tmp}/zet-generate.lock"
+rmdir "$_LOCKDIR" 2>/dev/null || true
+mkdir "$_LOCKDIR"                                  # simulate another process holding the lock
+( sleep 2; rmdir "$_LOCKDIR" 2>/dev/null ) &        # releases it after 2s — the waiter must not finish before this
+_START=$(date +%s)
+run_gen >/dev/null
+_ELAPSED=$(( $(date +%s) - _START ))
+wait
+if [ "$_ELAPSED" -ge 2 ]; then
+    zet_pass "waited for the real lock holder (${_ELAPSED}s >= 2s, no steal)"
+else
+    zet_fail "proceeded before the lock was released (${_ELAPSED}s < 2s) — possible steal"
+fi
+teardown
+
+# Test 16: EVERY test is isolated from the user's REAL ~/.claude/skills-local, not just the ones that
+# reference ZET_SKILLS_LOCAL explicitly. A plain run_gen (no per-test override, mirrors most of the suite's
+# tests) must write into setup()'s isolated dir, never the real one — guards the exact leak that emptied the
+# skill set (the suite ran with ZET_SKILLS_LOCAL unset in most tests, so it fell through to the live default).
+echo ""
+echo "--- Default ZET_SKILLS_LOCAL from setup() isolates every test, even without a per-test override ---"
+setup
+cat > "$ZET_TEMPLATES/isolcheck_prompt_template.md" <<'EOF'
+---
+type: skill
+role: execute
+description: isolation probe
+---
+# Isolation check
+EOF
+run_gen >/dev/null   # no explicit ZET_SKILLS_LOCAL export in this test body — setup() must have covered it
+assert_file_exists "$ZET_SKILLS_LOCAL/skills/isolcheck/SKILL.md" "plain run_gen still isolated by setup()'s default"
 teardown
 
 zet_test_results
