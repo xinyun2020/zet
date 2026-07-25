@@ -29,6 +29,12 @@ ZET_FAILURES=""
 ZET_TEST_HOME=""
 
 zet_test_setup() {
+    # Reset TMPDIR to the system default BEFORE creating this test's temp home. A prior test may have pointed
+    # TMPDIR at its own $TEST_HOME/tmp (to isolate something like a lock file) and teardown() then deleted
+    # that directory — if TMPDIR is left pointing at it, THIS test's own mktemp -d fails ("no such file or
+    # directory") because it tries to create its temp dir inside an already-removed parent. Unsetting first
+    # makes every test start from the real system tmp, independent of what any earlier test configured.
+    unset TMPDIR
     ZET_TEST_HOME=$(mktemp -d)
     export TEST_HOME="$ZET_TEST_HOME"
     export TEST_TMP="$ZET_TEST_HOME/tmp"
