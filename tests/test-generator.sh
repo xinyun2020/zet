@@ -23,6 +23,9 @@ setup() {
     # export ZET_SKILLS_CODEX itself just gets the feature-off no-op path, never a stray inherited value
     # from the calling shell.
     unset ZET_SKILLS_CODEX
+    # scope: universal / minimal-profile has NO live default either (same reasoning as skills-codex) —
+    # unset it here so a test that forgets to export ZET_SKILLS_MINIMAL gets the feature-off no-op path.
+    unset ZET_SKILLS_MINIMAL
     export ZET_AGENTS="$TEST_HOME/output/agents"
     export ZET_RULES="$TEST_HOME/output/rules"
     export ZET_MODEL_ROLES="$ZET_ROOT/model-roles.conf"
@@ -485,6 +488,137 @@ EOF
 run_gen >/dev/null
 assert_file_exists "$ZET_SKILLS/retag/SKILL.md" "retagged skill still in full set"
 assert_file_not_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "stale codex copy removed after retag"
+teardown
+
+# Test 22: DEFAULT scope is "vault" — a skill with no scope: field does NOT get mirrored into
+# skills-minimal, mirroring backend: codex's no-op-by-default reasoning (Test 17/19).
+echo ""
+echo "--- Default scope is vault (no scope: field needed, no minimal copy) ---"
+setup
+export ZET_SKILLS_MINIMAL="$TEST_HOME/output/skills-minimal"
+mkdir -p "$ZET_SKILLS_MINIMAL"
+cat > "$ZET_TEMPLATES/noscope_prompt_template.md" <<'EOF'
+---
+type: skill
+description: no scope field set
+---
+# No Scope
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/noscope/SKILL.md" "no-scope skill still lands in the full set"
+assert_file_not_exists "$ZET_SKILLS_MINIMAL/skills/noscope/SKILL.md" "no-scope skill does NOT get a minimal copy"
+teardown
+
+# Test 23: scope: universal mirrors the skill into skills-minimal WHEN that path is configured,
+# using the SAME model (no remapping, unlike tier: local) and emits the plugin manifest.
+echo ""
+echo "--- scope: universal mirrors into skills-minimal when configured ---"
+setup
+export ZET_SKILLS_MINIMAL="$TEST_HOME/output/skills-minimal"
+mkdir -p "$ZET_SKILLS_MINIMAL"
+cat > "$ZET_TEMPLATES/universalskill_prompt_template.md" <<'EOF'
+---
+type: skill
+scope: universal
+model: sonnet
+description: repo-agnostic skill
+---
+# Universal Skill
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS_MINIMAL/skills/universalskill/SKILL.md" "universal-scope skill mirrored into skills-minimal"
+if grep -q "^model: sonnet$" "$ZET_SKILLS_MINIMAL/skills/universalskill/SKILL.md"; then
+    zet_pass "minimal-profile copy keeps the SAME model (no remapping)"
+else
+    zet_fail "minimal-profile copy did not preserve model:"
+fi
+assert_file_exists "$ZET_SKILLS_MINIMAL/.claude-plugin/plugin.json" "minimal-profile plugin manifest emitted"
+teardown
+
+# Test 24: scope: universal is a NO-OP when skills-minimal isn't configured — same no-default
+# reasoning as backend: codex (Test 19).
+echo ""
+echo "--- scope: universal is a no-op with no skills-minimal configured ---"
+setup
+# ZET_SKILLS_MINIMAL deliberately left unset (setup() already unsets it)
+cat > "$ZET_TEMPLATES/universalnoconf_prompt_template.md" <<'EOF'
+---
+type: skill
+scope: universal
+description: universal but no minimal path configured
+---
+# Universal No Config
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/universalnoconf/SKILL.md" "universal skill still lands in the full set with no config"
+teardown
+
+# Test 25: unknown scope value falls back to "vault" (excluded from minimal) with a warning, rather
+# than dropping the skill from the full set — mirrors Test 20's backend fallback.
+echo ""
+echo "--- Unknown scope value falls back to vault with a warning ---"
+setup
+export ZET_SKILLS_MINIMAL="$TEST_HOME/output/skills-minimal"
+mkdir -p "$ZET_SKILLS_MINIMAL"
+cat > "$ZET_TEMPLATES/badscope_prompt_template.md" <<'EOF'
+---
+type: skill
+scope: sparkles
+description: bogus scope value
+---
+# Bad Scope
+EOF
+run_output=$(run_gen)
+assert_file_exists "$ZET_SKILLS/badscope/SKILL.md" "bogus-scope skill still lands in the full set"
+assert_file_not_exists "$ZET_SKILLS_MINIMAL/skills/badscope/SKILL.md" "bogus-scope skill excluded from minimal set (fell back to vault)"
+if echo "$run_output" | grep -q "unknown scope 'sparkles'"; then
+    zet_pass "warns on unknown scope value"
+else
+    zet_fail "did not warn on unknown scope value"
+fi
+teardown
+
+# Test 26: retagging a skill from universal to vault removes its stale copy from skills-minimal
+# (the wipe-then-regenerate guard — cleanup_stale alone can't catch this since the skill is still
+# type: skill). Mirrors Test 21's codex retag test.
+echo ""
+echo "--- Retagging scope: universal -> vault removes the stale skills-minimal copy ---"
+setup
+export ZET_SKILLS_MINIMAL="$TEST_HOME/output/skills-minimal"
+mkdir -p "$ZET_SKILLS_MINIMAL"
+cat > "$ZET_TEMPLATES/retagscope_prompt_template.md" <<'EOF'
+---
+type: skill
+scope: universal
+description: starts as universal scope
+---
+# Retag Scope
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS_MINIMAL/skills/retagscope/SKILL.md" "minimal copy exists before retag"
+cat > "$ZET_TEMPLATES/retagscope_prompt_template.md" <<'EOF'
+---
+type: skill
+description: retagged to vault-only
+---
+# Retag Scope
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/retagscope/SKILL.md" "retagged skill still in full set"
+assert_file_not_exists "$ZET_SKILLS_MINIMAL/skills/retagscope/SKILL.md" "stale minimal copy removed after retag"
+teardown
+
+# Test 27: same-dir safety abort — skills-minimal (or its skills/ subdir) resolving to the full
+# skills dir must refuse to run, mirroring the skills-local guard this exact bug class was fixed for.
+echo ""
+echo "--- skills-minimal resolving to the full skills dir aborts generation ---"
+setup
+export ZET_SKILLS_MINIMAL="$ZET_SKILLS"
+if bash "$GENERATOR" --quiet 2>&1 | grep -q "Refusing to run"; then
+    zet_pass "generator refuses to run when skills-minimal equals the full skills dir"
+else
+    zet_fail "generator did NOT refuse when skills-minimal equals the full skills dir"
+fi
 teardown
 
 zet_test_results
