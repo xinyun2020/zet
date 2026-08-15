@@ -13,6 +13,21 @@
 #   ZET_AGENTS       — agent output dir (default: ~/.claude/agents)
 #   ZET_RULES        — rule output dir (default: ~/.claude/rules)
 #   ZET_MODEL_ROLES  — model-roles config file path
+#   ZET_SKILLS_LOCAL — local-tier (opencode/Ollama) skill output dir
+#   ZET_SKILLS_CODEX — codex-backend skill output dir (unset = feature off, no default)
+#
+# BACKEND TAGGING (generalizes the tier/local-set pattern):
+#   A template can set `backend: claude|opencode|codex` (default: claude — every existing template
+#   that never sets it keeps generating ONLY into the full Claude skill set, unchanged).
+#   `backend: opencode` is the SAME mechanism `tier: local` already used (a local-model session):
+#   role: resolves through the *_local model-roles column, output mirrors into [paths].skills-local.
+#   `backend: codex` mirrors into [paths].skills-codex IF that path is configured — Codex's own
+#   skill format (name/description frontmatter, $CODEX_HOME/skills/<name>/SKILL.md) has no per-skill
+#   model: override (Codex's model is a single global config, not chosen per skill), so no model: line
+#   is ever emitted for it. If skills-codex isn't configured, the backend tag is a documentation-only
+#   no-op — most Codex usage in this system is `codex exec`/`codex review` one-shot invocations with
+#   the prompt content already inlined by the caller, not a loaded skill set, so there is nothing to
+#   mirror into by default.
 set -e
 
 # --- Concurrency lock ---
@@ -62,6 +77,13 @@ RULES_DIR="$(resolve_path "${ZET_RULES:-$(zet_config_get "paths" "rules" "$HOME/
 # the same skills as the full-Claude session. Default location beside the full set; override via
 # ZET_SKILLS_LOCAL / [paths].skills-local.
 SKILLS_LOCAL_DIR="$(resolve_path "${ZET_SKILLS_LOCAL:-$(zet_config_get "paths" "skills-local" "$HOME/.claude/skills-local")}")"
+# CODEX-BACKEND skill output — mirrors `backend: codex` skills into a dedicated dir, ONLY if configured.
+# Unlike skills-local (which always has a default), this has NO default: emitting into ~/.codex/skills by
+# default would silently start writing into another CLI's real skill directory for every zet project, even
+# ones that never asked for Codex output. Empty/unset ⇒ feature is off ⇒ backend: codex is a no-op.
+_skills_codex_raw="${ZET_SKILLS_CODEX:-$(zet_config_get "paths" "skills-codex" "")}"
+SKILLS_CODEX_DIR=""
+[ -n "$_skills_codex_raw" ] && SKILLS_CODEX_DIR="$(resolve_path "$_skills_codex_raw")"
 # Agent Skills Open Standard output (interop with Codex, Cursor, Gemini CLI, etc.)
 _agents_std_raw="${ZET_AGENTS_STD:-$(zet_config_get "paths" "agents-std" "")}"
 AGENTS_STD_DIR=""
@@ -91,6 +113,7 @@ $QUIET || echo "=== Zet Generate ==="
 $QUIET || echo "Templates: $TEMPLATE_DIR"
 $QUIET || echo "Output: skills=$SKILLS_DIR | agents=$AGENTS_DIR | rules=$RULES_DIR"
 [ -n "$AGENTS_STD_DIR" ] && ! $QUIET && echo "Interop: $AGENTS_STD_DIR (Agent Skills Open Standard)"
+[ -n "$SKILLS_CODEX_DIR" ] && ! $QUIET && echo "Backend: $SKILLS_CODEX_DIR (codex)"
 ! $QUIET && $DRY_RUN && echo "DRY RUN — no files will be written"
 
 # --- Helpers ---
@@ -240,6 +263,19 @@ ensure_dir "$SKILLS_LOCAL_DIR"
 ensure_dir "$AGENTS_DIR"
 ensure_dir "$RULES_DIR"
 [ -n "$AGENTS_STD_DIR" ] && ensure_dir "$AGENTS_STD_DIR"
+# Codex-backend output is a plain additive copy dir (no wipe-then-write step like skills-local's plugin
+# set), so it doesn't need the same-dir safety abort above — worst case of a misconfigured skills-codex
+# pointing at the full skills dir is an extra SKILL.md write, not a destructive wipe.
+if [ -n "$SKILLS_CODEX_DIR" ]; then
+    ensure_dir "$SKILLS_CODEX_DIR"
+    # Wipe-then-regenerate, same reasoning as the local-tier set below: a skill retagged codex→claude (or
+    # backend: codex removed) still matches type: skill, so cleanup_stale's "no matching template" check
+    # would never catch it — only a full wipe before rebuilding guarantees no stale codex-only copy survives.
+    if ! $DRY_RUN; then
+        find "$SKILLS_CODEX_DIR" -mindepth 1 -maxdepth 2 -name SKILL.md -delete 2>/dev/null || true
+        find "$SKILLS_CODEX_DIR" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+    fi
+fi
 # The local set is emitted as a PLUGIN so a local-model client (ccl/openclaude) can load it via --plugin-dir
 # (openclaude discovers skills from <pluginroot>/skills/<name>/SKILL.md + a .claude-plugin/plugin.json
 # manifest — a bare skills dir is NOT loadable). Local skills live under $SKILLS_LOCAL_SKILLS_DIR (defined +
@@ -313,6 +349,22 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
             # never even be attempted locally (e.g. needs credentials/hooks only the full session has).
             tier=$(get_frontmatter_value "$file" "tier")
             [ -z "$tier" ] && tier="local"
+
+            # BACKEND: which harness this skill is written for. Default "claude" — every existing
+            # template that never sets this field keeps behaving exactly as before (full-Claude-only
+            # skill, no codex copy). "opencode" is documentation for the tier:local mechanism above (the
+            # thing already covering local-model/Ollama sessions); "codex" additionally mirrors into
+            # [paths].skills-codex when configured. Unknown values fall back to "claude" with a warning
+            # rather than silently dropping the skill from the full set.
+            backend=$(get_frontmatter_value "$file" "backend")
+            [ -z "$backend" ] && backend="claude"
+            case "$backend" in
+                claude|opencode|codex) ;;
+                *)
+                    echo "  WARNING: $filename — unknown backend '$backend', treating as 'claude'" >&2
+                    backend="claude"
+                    ;;
+            esac
 
             if [ -n "$role" ]; then
                 resolved=$(resolve_model_role "$role" || true)
@@ -426,6 +478,33 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
                 } > "$local_skill_dir/SKILL.md"
                 $QUIET || echo "  skill: $name (+local)"
             fi
+
+            # CODEX-BACKEND set: only skills marked `backend: codex` mirror into SKILLS_CODEX_DIR, and
+            # only when that path is actually configured (unset ⇒ feature off, see SKILLS_CODEX_DIR above).
+            # No model: line — Codex has no per-skill model override, it's one global model in
+            # ~/.codex/config.toml (verified via `codex exec --help`: model is a top-level -c override,
+            # never a SKILL.md field), so emitting one here would just be dead frontmatter Codex ignores.
+            if [ "$backend" = "codex" ] && [ -n "$SKILLS_CODEX_DIR" ] && ! $DRY_RUN; then
+                codex_skill_dir="$SKILLS_CODEX_DIR/$name"
+                mkdir -p "$codex_skill_dir"
+                {
+                    echo "---"
+                    echo "name: $name"
+                    echo "description: $desc"
+                    echo "---"
+                    echo "<!-- Generated by Zet from $filename (codex backend) — do not edit directly -->"
+                    echo "<!-- Regenerate: zet generate -->"
+                    echo ""
+                    printf 'follow %s\n' "$TEMPLATE_DIR/$filename"
+                    if [ -n "$prompt_extra" ]; then
+                        printf '%s' "$prompt_extra" | sed 's/\\n/\n/g'
+                        echo ""
+                    fi
+                    echo ""
+                    echo "Read the template file first, then execute its instructions completely."
+                } > "$codex_skill_dir/SKILL.md"
+                $QUIET || echo "  skill: $name (+codex)"
+            fi
             ;;
 
         agent)
@@ -485,6 +564,8 @@ cleanup_stale "$SKILLS_DIR" "*/" "skill"
 cleanup_stale "$AGENTS_DIR" "*.md" "agent"
 cleanup_stale "$RULES_DIR" "*.md" "rule"
 [ -n "$AGENTS_STD_DIR" ] && cleanup_stale "$AGENTS_STD_DIR" "*/" "skill"
+# skills-codex needs no cleanup_stale pass: it's already wiped-then-regenerated per run (above, same
+# reasoning as skills-local) so a codex→claude retag can never leave a stale copy behind.
 
 # --- Summary ---
 $QUIET || echo ""

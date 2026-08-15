@@ -42,6 +42,8 @@ The name is derived from the filename: strip `_prompt_template.md` suffix. This 
 | `args` | skills | Hint for CLI arguments (shown in help) |
 | `context` | skills | Context loading strategy |
 | `prompt` | skills | Additional prompt text appended after the follow directive |
+| `tier` | skills | `local` (default) or `full-only`. `local` also mirrors the skill into `[paths].skills-local` with `role:` resolved through the local (Ollama) model column, for a local-model client (e.g. `ccl`) loading it via `--plugin-dir`. `full-only` opts a skill out of that mirror entirely (e.g. it needs credentials/hooks only the full session has) |
+| `backend` | skills | `claude` (default), `opencode`, or `codex`. `claude` is the plain full-Claude skill, unaffected by this field — every template written before `backend:` existed keeps behaving exactly as before. `opencode` documents that a skill also targets the `tier: local` mirror above. `codex` additionally mirrors the skill into `[paths].skills-codex` when that path is configured (unset = no-op: Codex is typically driven as a stateless one-shot reviewer via `codex exec`/`codex review`, not a loaded skill set, and has no per-skill model override, so no `model:` line is ever emitted into the codex copy) |
 
 ### Pass-through Fields
 

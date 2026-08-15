@@ -19,6 +19,10 @@ setup() {
     # suite corrupts the USER's real local skill set on every run (a stray test-fixture dir ended up there
     # after a suite run touched live output). Every test must be fully isolated, not just the ones that ask.
     export ZET_SKILLS_LOCAL="$TEST_HOME/output/skills-local"
+    # backend: codex has NO live default (unlike skills-local) — unset it here so a test that forgets to
+    # export ZET_SKILLS_CODEX itself just gets the feature-off no-op path, never a stray inherited value
+    # from the calling shell.
+    unset ZET_SKILLS_CODEX
     export ZET_AGENTS="$TEST_HOME/output/agents"
     export ZET_RULES="$TEST_HOME/output/rules"
     export ZET_MODEL_ROLES="$ZET_ROOT/model-roles.conf"
@@ -362,6 +366,125 @@ description: isolation probe
 EOF
 run_gen >/dev/null   # no explicit ZET_SKILLS_LOCAL export in this test body — setup() must have covered it
 assert_file_exists "$ZET_SKILLS_LOCAL/skills/isolcheck/SKILL.md" "plain run_gen still isolated by setup()'s default"
+teardown
+
+# Test 17: DEFAULT backend is "claude" — a skill with no backend: field behaves exactly as before
+# (full backward compat: every existing template that never set this field is unaffected).
+echo ""
+echo "--- Default backend is claude (no backend: field needed, no codex copy) ---"
+setup
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+mkdir -p "$ZET_SKILLS_CODEX"
+cat > "$ZET_TEMPLATES/nobackend_prompt_template.md" <<'EOF'
+---
+type: skill
+description: no explicit backend
+---
+# No backend field
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/nobackend/SKILL.md" "no-backend skill still in full set"
+assert_file_not_exists "$ZET_SKILLS_CODEX/nobackend/SKILL.md" "no-backend skill does NOT get a codex copy"
+teardown
+
+# Test 18: backend: codex mirrors the skill into skills-codex WHEN that path is configured, with no
+# model: line (Codex has no per-skill model override — one global model in ~/.codex/config.toml).
+echo ""
+echo "--- backend: codex mirrors into skills-codex when configured ---"
+setup
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+mkdir -p "$ZET_SKILLS_CODEX"
+cat > "$ZET_TEMPLATES/codexskill_prompt_template.md" <<'EOF'
+---
+type: skill
+role: execute
+backend: codex
+description: codex-backend skill
+---
+# Codex skill
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/codexskill/SKILL.md" "codex-backend skill still in full Claude set"
+assert_file_exists "$ZET_SKILLS_CODEX/codexskill/SKILL.md" "codex-backend skill mirrored into skills-codex"
+if grep -q "^model:" "$ZET_SKILLS_CODEX/codexskill/SKILL.md"; then
+    zet_fail "codex copy must never emit a model: line (Codex has no per-skill model override)"
+else
+    zet_pass "codex copy has no model: line"
+fi
+teardown
+
+# Test 19: backend: codex is a NO-OP when skills-codex isn't configured — most Codex usage is a
+# stateless codex exec/review one-shot, not a loaded skill set, so there is nothing to write by default.
+echo ""
+echo "--- backend: codex is a no-op with no skills-codex configured ---"
+setup
+# ZET_SKILLS_CODEX deliberately left unset (setup() already unsets it)
+cat > "$ZET_TEMPLATES/codexnoop_prompt_template.md" <<'EOF'
+---
+type: skill
+backend: codex
+description: codex backend, no output dir configured
+---
+# Codex no-op
+EOF
+run_output=$(run_gen)
+assert_file_exists "$ZET_SKILLS/codexnoop/SKILL.md" "codex-backend skill still generated in full set"
+if echo "$run_output" | grep -q "skills-codex"; then
+    zet_fail "generator referenced skills-codex even though it isn't configured"
+else
+    zet_pass "no skills-codex reference when unconfigured"
+fi
+teardown
+
+# Test 20: unknown backend value falls back to "claude" (full set) with a warning, rather than dropping
+# the skill or crashing.
+echo ""
+echo "--- Unknown backend value falls back to claude with a warning ---"
+setup
+cat > "$ZET_TEMPLATES/badbackend_prompt_template.md" <<'EOF'
+---
+type: skill
+backend: sparkles
+description: bogus backend value
+---
+# Bad backend
+EOF
+run_output=$(run_gen)
+assert_file_exists "$ZET_SKILLS/badbackend/SKILL.md" "bogus-backend skill still lands in the full set"
+if echo "$run_output" | grep -q "unknown backend 'sparkles'"; then
+    zet_pass "warns on unknown backend value"
+else
+    zet_fail "did not warn on unknown backend value"
+fi
+teardown
+
+# Test 21: retagging a skill from codex to claude removes its stale copy from skills-codex (the
+# wipe-then-regenerate guard — cleanup_stale alone can't catch this since the skill is still type: skill).
+echo ""
+echo "--- Retagging backend: codex -> claude removes the stale skills-codex copy ---"
+setup
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+mkdir -p "$ZET_SKILLS_CODEX"
+cat > "$ZET_TEMPLATES/retag_prompt_template.md" <<'EOF'
+---
+type: skill
+backend: codex
+description: starts as codex backend
+---
+# Retag
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "codex copy exists before retag"
+cat > "$ZET_TEMPLATES/retag_prompt_template.md" <<'EOF'
+---
+type: skill
+description: retagged to claude-only
+---
+# Retag
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS/retag/SKILL.md" "retagged skill still in full set"
+assert_file_not_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "stale codex copy removed after retag"
 teardown
 
 zet_test_results

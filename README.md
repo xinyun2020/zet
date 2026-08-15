@@ -91,6 +91,14 @@ rules = "~/.claude/rules/"
 # Optional: generate Agent Skills Open Standard output for cross-tool interop
 # agents-std = ".agents/skills/"
 
+# Optional: local-tier skill set for a local-model session (backend/tier: local, default for every
+# skill unless it opts out with tier: full-only)
+# skills-local = "~/.claude/skills-local/"
+
+# Optional: mirror `backend: codex` skills here. No default — Codex is usually driven as a stateless
+# one-shot (`codex exec`/`codex review`), not a loaded skill set, so leaving this unset is a no-op.
+# skills-codex = "~/.codex/skills/"
+
 [model-roles]
 audit = "haiku"
 execute = "sonnet"
