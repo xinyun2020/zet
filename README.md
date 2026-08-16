@@ -31,21 +31,11 @@ Think: `package.json` defines a Node project. `zet.toml` defines an AI harness.
 ## Quick Start
 
 ```bash
-# Option 1: npx (zero install)
-npx @xinyun2020/zet init
-npx @xinyun2020/zet generate
-
-# Option 2: npm global install
-npm install -g @xinyun2020/zet
-zet init
-zet generate
-
-# Option 3: Homebrew (macOS)
-brew tap xinyun2020/tap && brew install zet
-
-# Option 4: curl install (no Node required)
+# curl install (no Node required)
 curl -fsSL https://raw.githubusercontent.com/xinyun2020/zet/main/install.sh | bash
 ```
+
+npm/npx and Homebrew installs are coming soon — not published yet.
 
 `zet init` scaffolds a `zet.toml` and starter template. From there:
 
@@ -138,9 +128,7 @@ The interop output uses the same SKILL.md format (YAML frontmatter + markdown bo
 
 ## Upgrade
 
-```bash
-npm update -g @xinyun2020/zet
-```
+Re-run the curl install command above — it always fetches the latest release. A dedicated `zet upgrade` command and npm-based upgrade are coming soon.
 
 ## Contributing
 
