@@ -22,6 +22,20 @@ get_frontmatter_value() {
     awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^'"$key"':/{sub(/^'"$key"': *"?/,"");sub(/"$/,"");print;exit}' "$file"
 }
 
+# Quote a string for safe use as a YAML frontmatter scalar value.
+# generator.sh writes frontmatter values (e.g. description) that get_frontmatter_value
+# above strips quotes from when READING templates. Values containing ": " (colon-space)
+# are valid prose but invalid unquoted YAML — strict parsers (Pi's Agent Skills loader)
+# reject them as "nested mappings", while looser parsers (Claude Code) silently tolerate it.
+# Args: raw_value
+# Returns: a double-quoted YAML scalar with backslashes and quotes escaped
+yaml_quote() {
+    local v="$1"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '"%s"' "$v"
+}
+
 # Get a YAML list field from frontmatter (handles multi-line "- item" syntax)
 # Args: file_path, key_name
 # Returns: newline-separated list items (stripped of "- " prefix and quotes)
