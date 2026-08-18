@@ -69,6 +69,12 @@ cmd_generate() {
         eval "$custom_cmd" "$@"
     else
         bash "$ZET_CORE/generator.sh" "$@"
+        # Separate script, separate invocation (not merged into generator.sh): hooks are a
+        # structurally different unit (TOML table source, .ts output, not a markdown template),
+        # and generator.sh already carries the lock/wipe/skills-local/skills-codex logic at
+        # ~900 lines — a third unrelated output kind there would make an already-large file
+        # harder to review.
+        bash "$ZET_CORE/hooks-generator.sh" "$@"
     fi
 }
 

@@ -6,12 +6,13 @@
 # Checks:
 #   1. Orphaned templates — not generating anything (no valid type: field)
 #   2. Dead generated files — AUTO-GENERATED marker but no source template
-#   3. Orphaned hooks — hook scripts not referenced in any config
-#   4. Stale config references — paths in config that don't exist on disk
-#   5. Duplicate names — same name across templates
+#   3. Duplicate names — same name across templates
+#   4. Orphaned hooks — hook scripts not referenced in any config
+#   6. Dead generated hook shims — Zet-marked .ts file with no [hooks.<name>] entry
+#      still targeting pi (see core/hooks-generator.sh)
 #
 # Configuration via environment or zet.toml:
-#   ZET_ROOT, ZET_TEMPLATES, ZET_SKILLS, ZET_AGENTS, ZET_RULES
+#   ZET_ROOT, ZET_TEMPLATES, ZET_SKILLS, ZET_AGENTS, ZET_RULES, ZET_PI_EXTENSIONS
 set -eo pipefail
 
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
@@ -25,6 +26,9 @@ SKILLS_DIR="$(resolve_path "${ZET_SKILLS:-$(zet_config_get "paths" "skills" "$HO
 AGENTS_DIR="$(resolve_path "${ZET_AGENTS:-$(zet_config_get "paths" "agents" "$HOME/.claude/agents")}")"
 RULES_DIR="$(resolve_path "${ZET_RULES:-$(zet_config_get "paths" "rules" "$HOME/.claude/rules")}")"
 HOOKS_DIR="$(resolve_path "${ZET_HOOKS:-$(zet_config_get "paths" "hooks" "$ZET_ROOT/hooks")}")"
+_pi_extensions_raw="${ZET_PI_EXTENSIONS:-$(zet_config_get "paths" "pi-extensions" "")}"
+PI_EXTENSIONS_DIR=""
+[ -n "$_pi_extensions_raw" ] && PI_EXTENSIONS_DIR="$(resolve_path "$_pi_extensions_raw")"
 
 JSON_MODE=false
 while [[ $# -gt 0 ]]; do
@@ -44,6 +48,7 @@ declare -a DEAD_AGENTS=()
 declare -a DEAD_RULES=()
 declare -a DUPLICATE_NAMES=()
 declare -a ORPHANED_HOOKS=()
+declare -a DEAD_HOOK_SHIMS=()
 
 # --- 1. Orphaned templates (no valid type) ---
 if [ -d "$TEMPLATE_DIR" ]; then
@@ -127,8 +132,35 @@ if [ -d "$HOOKS_DIR" ]; then
     done
 fi
 
+# --- 6. Dead generated hook shims — .ts files with the Zet marker but no matching
+# [hooks.<name>] entry that still targets pi. Never touches hand-written .ts (a shim not yet
+# migrated into the [hooks.*] system has no marker and is skipped by the grep below).
+# Token-aware check, not a *pi* substring match (see core/hooks-generator.sh's _targets_has_pi
+# for the identical reasoning) — a bare substring match would treat a hypothetical future target
+# like "opencode-pi-bridge" as targeting pi and wrongly clear a genuinely dead shim.
+_targets_has_pi() {
+    local targets="$1" token
+    targets="${targets#\[}"; targets="${targets%\]}"
+    IFS=',' read -ra _tokens <<< "$targets"
+    for token in "${_tokens[@]}"; do
+        token="${token//\"/}"; token="${token//\'/}"
+        token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
+        [ "$token" = "pi" ] && return 0
+    done
+    return 1
+}
+if [ -n "$PI_EXTENSIONS_DIR" ] && [ -d "$PI_EXTENSIONS_DIR" ]; then
+    for ts_file in "$PI_EXTENSIONS_DIR"/*.ts; do
+        [ -f "$ts_file" ] || continue
+        name=$(basename "$ts_file" .ts)
+        grep -qE "$MARKER_PATTERN" "$ts_file" 2>/dev/null || continue
+        targets=$(zet_config_get "hooks.$name" "targets" "")
+        _targets_has_pi "$targets" || DEAD_HOOK_SHIMS+=("$name")
+    done
+fi
+
 # --- Output ---
-TOTAL=$(( ${#ORPHANED_TEMPLATES[@]} + ${#DEAD_SKILLS[@]} + ${#DEAD_AGENTS[@]} + ${#DEAD_RULES[@]} + ${#DUPLICATE_NAMES[@]} + ${#ORPHANED_HOOKS[@]} ))
+TOTAL=$(( ${#ORPHANED_TEMPLATES[@]} + ${#DEAD_SKILLS[@]} + ${#DEAD_AGENTS[@]} + ${#DEAD_RULES[@]} + ${#DUPLICATE_NAMES[@]} + ${#ORPHANED_HOOKS[@]} + ${#DEAD_HOOK_SHIMS[@]} ))
 
 if $JSON_MODE; then
     to_json() {
@@ -143,6 +175,7 @@ if $JSON_MODE; then
         "$(to_json "${DEAD_RULES[@]}")" \
         "$(to_json "${DUPLICATE_NAMES[@]}")" \
         "$(to_json "${ORPHANED_HOOKS[@]}")" \
+        "$(to_json "${DEAD_HOOK_SHIMS[@]}")" \
         <<'PYEOF'
 import json, sys
 print(json.dumps({
@@ -153,6 +186,7 @@ print(json.dumps({
     "dead_rules": json.loads(sys.argv[4]),
     "duplicate_names": json.loads(sys.argv[5]),
     "orphaned_hooks": json.loads(sys.argv[6]),
+    "dead_hook_shims": json.loads(sys.argv[7]),
 }, indent=2))
 PYEOF
     exit 0
@@ -194,6 +228,12 @@ fi
 if [ ${#ORPHANED_HOOKS[@]} -gt 0 ]; then
     echo "--- Orphaned Hooks (not referenced in config) (${#ORPHANED_HOOKS[@]}) ---"
     for item in "${ORPHANED_HOOKS[@]}"; do echo "  - $item"; done
+    echo ""
+fi
+
+if [ ${#DEAD_HOOK_SHIMS[@]} -gt 0 ]; then
+    echo "--- Dead Hook Shims (generated .ts with no [hooks.<name>] targeting pi) (${#DEAD_HOOK_SHIMS[@]}) ---"
+    for item in "${DEAD_HOOK_SHIMS[@]}"; do echo "  - $item"; done
     echo ""
 fi
 

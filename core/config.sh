@@ -39,7 +39,11 @@ zet_config_validate() {
 
         # Section header
         if [[ "$line" =~ ^\[ ]]; then
-            if [[ ! "$line" =~ ^\[[a-zA-Z0-9_-]+\][[:space:]]*(#.*)?$ ]]; then
+            # Dotted section names (e.g. [hooks.danger-scan]) require each dot-separated segment
+            # to be non-empty — a plain [a-zA-Z0-9_.-]+ char class also accepts [hooks.] / [.hooks] /
+            # [hooks..danger] (consecutive/leading/trailing dots), which are malformed TOML dotted
+            # keys and should be caught here, not silently validated.
+            if [[ ! "$line" =~ ^\[[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\][[:space:]]*(#.*)?$ ]]; then
                 ZET_CONFIG_ERRORS+=("line $line_num: malformed section header: $line")
             else
                 current_section="${line#[}"

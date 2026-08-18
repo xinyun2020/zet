@@ -96,6 +96,42 @@ paths:
 When editing TypeScript files...
 ```
 
+## Hook Manifest (`[hooks.<name>]` in zet.toml)
+
+Hooks are a structurally different unit from skills/agents/rules — the source is an existing gate SCRIPT (bash, already wired into a Claude Code `.claude/settings.json` hook), not a markdown template. A `[hooks.<name>]` table in `zet.toml` names that script and declares which other harnesses, if any, have a generated shim for it. `core/hooks-generator.sh` reads these tables and emits Pi extension `.ts` shims — thin translators that shell out to the SAME script, never a reimplementation of its logic.
+
+Fields:
+
+| Field | Required | Description |
+|-------|----------|--------------|
+| `source` | always | Path (relative to project root) to the one bash script that is the actual gate logic |
+| `claude_event` | always | Documentation only, not read by the generator — which Claude Code hook event this fires on (e.g. `PreToolUse matcher=Edit\|Write`), for a human cross-reference against `.claude/settings.json` |
+| `targets` | always | Array of harnesses with a generated shim. Valid today: `["pi"]`, or `[]` for documentation-only |
+| `pi_event` | when `pi` in targets | Which Pi `ExtensionAPI` event the shim subscribes to (currently always `tool_call`) |
+| `pi_input_shape` | when `pi` in targets | `bash_command` (extract `event.input.command`, pipe to the script's `--why` mode on stdin) or `edit_write_content` (reconstruct the script's `{tool_name, tool_input}` stdin JSON from Pi's edit/write event) |
+| `note` | when `targets = []` | Free-text explaining why this hook is not portable yet (e.g. the target harness has no hook API, or the event shape needed doesn't exist) |
+
+`targets = []` is a valid, intentional state — not every hook can or should be ported. It requires a `note` so the gap is documented rather than silently missing.
+
+Example:
+
+```toml
+[hooks.danger-scan]
+source = "R-utils/scripts/ccs-danger-scan.sh"
+claude_event = "PreToolUse matcher=Bash"
+targets = ["pi"]
+pi_event = "tool_call"
+pi_input_shape = "bash_command"
+
+[hooks.require-codex-on-script-change]
+source = "R-utils/dotfiles/.claude/hooks/require-codex-on-script-change.sh"
+claude_event = "Stop"
+targets = []
+note = "Pi has no event exposing a transcript file path in a shape this script's parser understands — porting would require a second, independent parser, which duplicates gate logic."
+```
+
+Output dir is configured via `[paths].pi-extensions` (or `ZET_PI_EXTENSIONS`), same no-destructive-default pattern as `[paths].skills-codex` — unset means the feature is off, and a hook targeting `pi` with no output dir configured is a loud `WARNING`, not a silent no-op (a missing safety shim is a safety-relevant gap, unlike a missing skill mirror).
+
 ## Validation Rules
 
 `zet validate` enforces:

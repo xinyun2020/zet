@@ -161,6 +161,33 @@ assert_exit_code "${vcode:-0}" 1 "malformed section header fails validation"
 assert_not_empty "${ZET_CONFIG_ERRORS[0]}" "error message populated for bad section"
 
 echo ""
+echo "--- Validation: dotted sections (Codex-confirmed finding) ---"
+# A dotted section like [hooks.danger-scan] must validate CLEANLY (this is the whole point of
+# widening the regex to support [hooks.<name>] tables) — but malformed variants with
+# consecutive/leading/trailing dots must still be REJECTED, not silently accepted just because
+# the character class now includes dots.
+cat > "$TEST_TMP/zet.toml" <<'EOF'
+[hooks.danger-scan]
+source = "scripts/danger-scan.sh"
+EOF
+source "$SCRIPT_DIR/../core/config.sh"
+zet_config_init "$TEST_TMP"
+unset vcode
+zet_config_validate || vcode=$?
+assert_exit_code "${vcode:-0}" 0 "well-formed dotted section [hooks.danger-scan] validates cleanly"
+
+for bad in '[hooks.]' '[.hooks]' '[hooks..danger]' '[hooks...danger]'; do
+    cat > "$TEST_TMP/zet.toml" <<EOF
+$bad
+key = "value"
+EOF
+    zet_config_init "$TEST_TMP"
+    unset vcode
+    zet_config_validate || vcode=$?
+    assert_exit_code "${vcode:-0}" 1 "malformed dotted section '$bad' still fails validation"
+done
+
+echo ""
 echo "--- Validation: key outside section ---"
 cat > "$TEST_TMP/zet.toml" <<'EOF'
 name = "orphan"
