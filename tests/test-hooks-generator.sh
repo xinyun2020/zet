@@ -290,6 +290,44 @@ else
 fi
 teardown
 
+# --- push-approval escape hatch (2026-08-18): [paths].session-board unset means the generated
+# shim's spawnSync call carries NO env block at all (unchanged prior behavior) — configured means
+# ctx.cwd + the resolved board path ARE passed through, so the target script can opt into checking
+# a live approval instead of hard-blocking unconditionally. ---
+setup
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[hooks.fixture-bash]
+source = "scripts/fixture-bash.sh"
+targets = ["pi"]
+pi_input_shape = "bash_command"
+EOF
+bash "$GENERATOR" --quiet >/dev/null 2>&1
+out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
+assert_not_contains "$out" "_CCS_SESSION_BOARD" "no [paths].session-board configured: no env block, no push-approval plumbing added"
+teardown
+
+setup
+mkdir -p "$ZET_ROOT/board"
+cat > "$ZET_ROOT/board/session-board.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$ZET_ROOT/board/session-board.sh"
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[paths]
+session-board = "board/session-board.sh"
+[hooks.fixture-bash]
+source = "scripts/fixture-bash.sh"
+targets = ["pi"]
+pi_input_shape = "bash_command"
+EOF
+bash "$GENERATOR" --quiet >/dev/null 2>&1
+out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
+assert_contains "$out" "_CCS_SESSION_BOARD" "[paths].session-board configured: env block passes the resolved board path through"
+assert_contains "$out" "$ZET_ROOT/board/session-board.sh" "board path is resolved to an absolute path, not left relative"
+assert_contains "$out" "ctx.cwd" "shim passes ctx.cwd through so the target script can bind an approval to the real cwd"
+teardown
+
 echo ""
 echo "=== Results ==="
 echo "  Total: $((ZET_TESTS_PASSED + ZET_TESTS_FAILED)) | Passed: $ZET_TESTS_PASSED | Failed: $ZET_TESTS_FAILED"
