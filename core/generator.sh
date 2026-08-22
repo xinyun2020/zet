@@ -15,9 +15,10 @@
 #   ZET_MODEL_ROLES  — model-roles config file path
 #   ZET_SKILLS_LOCAL — local-tier (opencode/Ollama) skill output dir
 #   ZET_SKILLS_CODEX — codex-backend skill output dir (unset = feature off, no default)
+#   ZET_PI_PROMPTS — Pi prompt-template output dir (default: ~/.pi/agent/prompts)
 #
 # BACKEND TAGGING (generalizes the tier/local-set pattern):
-#   A template can set `backend: claude|opencode|codex` (default: claude — every existing template
+#   A template can set `backend: claude|opencode|codex|pi` (default: claude — every existing template
 #   that never sets it keeps generating ONLY into the full Claude skill set, unchanged).
 #   `backend: opencode` is the SAME mechanism `tier: local` already used (a local-model session):
 #   role: resolves through the *_local model-roles column, output mirrors into [paths].skills-local.
@@ -28,6 +29,11 @@
 #   no-op — most Codex usage in this system is `codex exec`/`codex review` one-shot invocations with
 #   the prompt content already inlined by the caller, not a loaded skill set, so there is nothing to
 #   mirror into by default.
+#   Every role-bearing skill additionally emits a prompt-template file into ZET_PI_PROMPTS. Unlike
+#   SKILL.md context, this file is discovered by pi-prompt-template-model and therefore consumes
+#   generated `model:` and `thinking:` frontmatter. The normal Claude skill output remains enabled.
+#   `backend: pi` remains accepted as an explicit annotation, but is not required for this additive
+#   output; a role is the signal that model/thinking routing can be generated safely.
 set -e
 
 # --- Concurrency lock ---
@@ -88,12 +94,15 @@ SKILLS_CODEX_DIR=""
 _agents_std_raw="${ZET_AGENTS_STD:-$(zet_config_get "paths" "agents-std" "")}"
 AGENTS_STD_DIR=""
 [ -n "$_agents_std_raw" ] && AGENTS_STD_DIR="$(resolve_path "$_agents_std_raw")"
+PI_PROMPTS_DIR="$(resolve_path "${ZET_PI_PROMPTS:-$(zet_config_get "paths" "pi-prompts" "$HOME/.pi/agent/prompts")}")"
 # Model roles: read from [model-roles] section in zet.toml (preferred),
 # fall back to standalone file for backwards compatibility
 MODEL_ROLES_FILE="$(resolve_path "${ZET_MODEL_ROLES:-$(zet_config_get "project" "model-roles-file" "$ZET_ROOT/model-roles.conf")}")"
 
 DRY_RUN=false
 QUIET=false
+RULE_ROOTS=()
+RULE_SOURCES=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry)   DRY_RUN=true; shift ;;
@@ -144,6 +153,69 @@ resolve_model_role() {
         return 0
     fi
     return 1
+}
+
+# Return an ordered Pi model chain for a template role. Pi's prompt extension accepts a comma-separated
+# model list, but its bare-ID provider preference is fixed upstream. Pairing each configured model with its
+# provider here keeps the user's provider/fallback order in model-roles.conf authoritative.
+resolve_pi_model_chain() {
+    local role="$1" pi_role="$1" i model provider entry chain=""
+    case "$role" in
+        execute)     pi_role="implement" ;;
+        audit)       pi_role="review" ;;
+        orchestrate) pi_role="discover" ;;
+    esac
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        if [ "$i" -eq 0 ]; then
+            model=$(resolve_model_role "pi_${pi_role}" || true)
+            provider=$(resolve_model_role "pi_${pi_role}_provider" || true)
+        else
+            model=$(resolve_model_role "pi_${pi_role}_fallback_${i}" || true)
+            provider=$(resolve_model_role "pi_${pi_role}_fallback_${i}_provider" || true)
+        fi
+        [ -z "$model" ] && continue
+        if [ -z "$provider" ]; then
+            echo "  WARNING: missing provider for Pi role '$pi_role' candidate '$model'" >&2
+            continue
+        fi
+        entry="$provider/$model"
+        chain="${chain:+$chain, }$entry"
+    done
+    [ -n "$chain" ] && printf '%s\n' "$chain"
+}
+
+resolve_pi_thinking() {
+    local role="$1" val
+    val=$(resolve_model_role "pi_${role}_thinking" || true)
+    [ -z "$val" ] && val=$(resolve_model_role "${role}_effort" || true)
+    case "$val" in
+        off|minimal|low|medium|high|xhigh|max) printf '%s\n' "$val" ;;
+        "") printf '%s\n' medium ;;
+        *) echo "  WARNING: invalid Pi thinking level '$val' for role '$role'; using medium" >&2; printf '%s\n' medium ;;
+    esac
+}
+
+# Emit a complete prompt-template consumed by pi-prompt-template-model. This is deliberately separate
+# from generated SKILL.md: Pi's extension applies model/thinking frontmatter to prompt files, while a
+# skill's frontmatter is only context metadata.
+generate_pi_prompt() {
+    local source="$1" target="$2" name="$3" desc="$4" role="$5" model_chain thinking
+    model_chain=$(resolve_pi_model_chain "$role" || true)
+    [ -n "$model_chain" ] || { echo "  WARNING: no Pi model chain for role '$role' in $(basename "$source")" >&2; return 0; }
+    thinking=$(resolve_pi_thinking "$role")
+    $DRY_RUN && { $QUIET || echo "  [dry] $target"; return; }
+    mkdir -p "$(dirname "$target")"
+    {
+        echo "---"
+        echo "description: $(yaml_quote "$desc")"
+        echo "model: $model_chain"
+        echo "thinking: $thinking"
+        echo "---"
+        echo "<!-- Generated by Zet from $(basename "$source") for Pi — do not edit directly -->"
+        echo "<!-- Regenerate: zet generate -->"
+        echo ""
+        awk 'BEGIN { fm=0; done=0 } NR==1 && $0=="---" { fm=1; next } fm && $0=="---" { fm=0; done=1; next } !fm && done { print }' "$source"
+    } > "$target"
 }
 
 resolve_model_role_local() {
@@ -230,6 +302,65 @@ generate_file() {
     } > "$target"
 }
 
+rule_roots() {
+    local source="$1"
+    awk '
+        BEGIN { in_fm = 0; in_paths = 0 }
+        NR == 1 && $0 == "---" { in_fm = 1; next }
+        in_fm && $0 == "---" { exit }
+        !in_fm { next }
+        /^paths:[[:space:]]*$/ { in_paths = 1; next }
+        in_paths && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { in_paths = 0 }
+        in_paths && /^[[:space:]]*-[[:space:]]*"?[A-Za-z0-9_.-]+\// {
+            value = $0
+            sub(/^[[:space:]]*-[[:space:]]*"?/, "", value)
+            sub(/"?[[:space:]]*$/, "", value)
+            sub(/\*\*.*/, "", value)
+            sub(/\*$/, "", value)
+            sub(/\/$/, "", value)
+            if (value != "" && value !~ /[*?[]/) print value
+        }
+    ' "$source" | sort -u
+}
+
+render_agents_md() {
+    local root="$1" sources="$2" target
+    target="$ZET_ROOT/$root/AGENTS.md"
+    [ -d "$ZET_ROOT/$root" ] || return 0
+    $DRY_RUN && { $QUIET || echo "  [dry] $target"; return; }
+    {
+        echo "<!-- Generated by Zet from path-scoped rules — do not edit directly -->"
+        echo "<!-- Regenerate: zet generate -->"
+        echo "# Agent Instructions"
+        echo ""
+        echo "These instructions are compiled from the path-scoped rule templates that apply to this directory."
+        local source
+        for source in $sources; do
+            echo ""
+            awk '
+                BEGIN { in_fm = 0 }
+                NR == 1 && $0 == "---" { in_fm = 1; next }
+                in_fm && $0 == "---" { in_fm = 0; next }
+                in_fm { next }
+                /^<!-- (Generated by Zet|Regenerate:)/ { next }
+                { print }
+            ' "$source"
+        done
+    } > "$target"
+}
+
+add_rule_source() {
+    local root="$1" source="$2" index
+    for index in "${!RULE_ROOTS[@]}"; do
+        if [ "${RULE_ROOTS[$index]}" = "$root" ]; then
+            RULE_SOURCES[$index]="${RULE_SOURCES[$index]} $source"
+            return
+        fi
+    done
+    RULE_ROOTS+=("$root")
+    RULE_SOURCES+=("$source")
+}
+
 # --- Ensure output dirs ---
 # SAFETY ABORT: the local-set wipe below deletes SKILL.md files under SKILLS_LOCAL_DIR. If a misconfig
 # (ZET_SKILLS_LOCAL / [paths].skills-local) or symlink drift ever resolved it to the SAME dir as the full
@@ -263,6 +394,14 @@ ensure_dir "$SKILLS_LOCAL_DIR"
 ensure_dir "$AGENTS_DIR"
 ensure_dir "$RULES_DIR"
 [ -n "$AGENTS_STD_DIR" ] && ensure_dir "$AGENTS_STD_DIR"
+ensure_dir "$PI_PROMPTS_DIR"
+# Pi prompt output is additive, but stale generated prompt files must not survive a template rename or
+# role removal. Delete only files carrying Zet's Pi marker; never wipe hand-authored prompts.
+if ! $DRY_RUN; then
+    while IFS= read -r pi_prompt; do
+        grep -q '<!-- Generated by Zet from .* for Pi — do not edit directly -->' "$pi_prompt" 2>/dev/null && rm -f "$pi_prompt"
+    done < <(find "$PI_PROMPTS_DIR" -maxdepth 1 -type f -name '*.md' -print 2>/dev/null)
+fi
 # Codex-backend output is a plain additive copy dir (no wipe-then-write step like skills-local's plugin
 # set), so it doesn't need the same-dir safety abort above — worst case of a misconfigured skills-codex
 # pointing at the full skills dir is an extra SKILL.md write, not a destructive wipe.
@@ -354,12 +493,13 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
             # template that never sets this field keeps behaving exactly as before (full-Claude-only
             # skill, no codex copy). "opencode" is documentation for the tier:local mechanism above (the
             # thing already covering local-model/Ollama sessions); "codex" additionally mirrors into
-            # [paths].skills-codex when configured. Unknown values fall back to "claude" with a warning
-            # rather than silently dropping the skill from the full set.
+            # [paths].skills-codex when configured; "pi" is documentation-only (see the file-header note
+            # above — Pi has no filesystem skill drop-in to mirror into). Unknown values fall back to
+            # "claude" with a warning rather than silently dropping the skill from the full set.
             backend=$(get_frontmatter_value "$file" "backend")
             [ -z "$backend" ] && backend="claude"
             case "$backend" in
-                claude|opencode|codex) ;;
+                claude|opencode|codex|pi) ;;
                 *)
                     echo "  WARNING: $filename — unknown backend '$backend', treating as 'claude'" >&2
                     backend="claude"
@@ -424,6 +564,14 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
 
             $QUIET || echo "  skill: $name"
             skill_count=$((skill_count + 1))
+
+            # PI PROMPT: every role-bearing skill gets a real prompt-template file. Pi discovers this
+            # directory as prompts; putting model metadata only in SKILL.md would be a false integration
+            # because the pi-prompt-template-model extension does not execute skill frontmatter.
+            if [ -n "$role" ]; then
+                generate_pi_prompt "$file" "$PI_PROMPTS_DIR/$name.md" "$name" "$desc" "$role"
+                $QUIET || echo "  skill: $name (+pi prompt)"
+            fi
 
             # Agent Skills Open Standard output (interop with Codex, Cursor, etc.)
             # Same SKILL.md format but written to /.agents/skills/ for cross-tool discovery
@@ -515,6 +663,9 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
 
         rule)
             generate_file "$file" "$RULES_DIR/$name.md" "rule"
+            while IFS= read -r root; do
+                add_rule_source "$root" "$file"
+            done < <(rule_roots "$file")
             $QUIET || echo "  rule: $name"
             rule_count=$((rule_count + 1))
             ;;
@@ -523,6 +674,10 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
             echo "  WARNING: unknown type '$type' in $filename — skipping" >&2
             ;;
     esac
+done
+
+for index in "${!RULE_ROOTS[@]}"; do
+    render_agents_md "${RULE_ROOTS[$index]}" "${RULE_SOURCES[$index]}"
 done
 
 # --- Cleanup stale generated files ---

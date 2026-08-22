@@ -43,7 +43,19 @@ The name is derived from the filename: strip `_prompt_template.md` suffix. This 
 | `context` | skills | Context loading strategy |
 | `prompt` | skills | Additional prompt text appended after the follow directive |
 | `tier` | skills | `local` (default) or `full-only`. `local` also mirrors the skill into `[paths].skills-local` with `role:` resolved through the local (Ollama) model column, for a local-model client (e.g. `ccl`) loading it via `--plugin-dir`. `full-only` opts a skill out of that mirror entirely (e.g. it needs credentials/hooks only the full session has) |
-| `backend` | skills | `claude` (default), `opencode`, or `codex`. `claude` is the plain full-Claude skill, unaffected by this field — every template written before `backend:` existed keeps behaving exactly as before. `opencode` documents that a skill also targets the `tier: local` mirror above. `codex` additionally mirrors the skill into `[paths].skills-codex` when that path is configured (unset = no-op: Codex is typically driven as a stateless one-shot reviewer via `codex exec`/`codex review`, not a loaded skill set, and has no per-skill model override, so no `model:` line is ever emitted into the codex copy) |
+| `backend` | skills | `claude` (default), `opencode`, `codex`, or `pi`. `claude` is the plain full-Claude skill, unaffected by this field — every template written before `backend:` existed keeps behaving exactly as before. `opencode` documents that a skill also targets the `tier: local` mirror above. `codex` additionally mirrors the skill into `[paths].skills-codex` when that path is configured (unset = no-op: Codex is typically driven as a stateless one-shot reviewer via `codex exec`/`codex review`, not a loaded skill set, and has no per-skill model override, so no `model:` line is ever emitted into the codex copy). `pi` is accepted as an explicit consumer annotation, but Pi prompt output is generated for every role-bearing skill so existing templates gain routing without a 57-file retagging pass. |
+
+### Pi prompt output
+
+Pi prompt output is intentionally separate from `SKILL.md`. Pi loads a skill as context, but `pi-prompt-template-model` applies `model:` and `thinking:` only to prompt-template files. Every skill with a `role:` therefore gets an additive prompt file; `backend: pi` may be used as an explicit annotation but is not required.
+
+For a template role `R`, Zet reads the Pi chain from the configured model-roles file in this order:
+
+```text
+pi_R, pi_R_fallback_1, pi_R_fallback_2, ...
+```
+
+Each model must have a matching `pi_R[_fallback_N]_provider`. Zet emits explicit `provider/model` values in that configured order, so extension-level bare-model provider preferences cannot reorder them. `execute` maps to the existing `implement` Pi role, `audit` maps to `review`, and `orchestrate` maps to `discover`. The role's `{R}_effort` becomes the extension's `thinking:` field.
 
 ### Pass-through Fields
 
