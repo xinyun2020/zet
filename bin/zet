@@ -123,8 +123,11 @@ cmd_test() {
 }
 
 cmd_validate() {
+    source "$ZET_CORE/config.sh"
     source "$ZET_CORE/frontmatter.sh"
-    local template_dir="${ZET_TEMPLATES:-$ZET_ROOT/templates}"
+    zet_config_init "$ZET_ROOT"
+    local template_dir
+    template_dir="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templates" "$ZET_ROOT/templates")}")"
     local errors=0
 
     if [ ! -d "$template_dir" ]; then
@@ -215,6 +218,9 @@ tests = "tests/"
 # Uncomment to also generate Agent Skills Open Standard output (interop with
 # Codex CLI, Cursor, Gemini CLI, and 30+ other tools that read this format).
 # agents-std = ".agents/skills/"
+# Uncomment to project generated skills into Codex's native skill dir.
+# Once configured, every generated skill is copied unless the template says `codex: false`.
+# skills-codex = "~/.codex/skills/"
 
 [model-roles]
 audit = "haiku"

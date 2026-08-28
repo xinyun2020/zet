@@ -231,6 +231,25 @@ section_out=$(zet_config_section "model-roles")
 assert_output_not_contains "$section_out" "#" "section listing strips inline comments"
 assert_output_contains "$section_out" 'audit = "haiku"' "section preserves key=value"
 
+echo ""
+echo "--- CLI validate reads [paths].templates ---"
+ZET_VALIDATE_ROOT="$TEST_TMP/validate-project"
+mkdir -p "$ZET_VALIDATE_ROOT/R-template"
+cat > "$ZET_VALIDATE_ROOT/zet.toml" <<'EOF'
+[paths]
+templates = "R-template/"
+EOF
+cat > "$ZET_VALIDATE_ROOT/R-template/hello_prompt_template.md" <<'EOF'
+---
+type: skill
+description: hello
+---
+# Hello
+EOF
+validate_out=$(ZET_ROOT="$ZET_VALIDATE_ROOT" "$SCRIPT_DIR/../bin/zet" validate 2>&1)
+assert_output_contains "$validate_out" "Checking: $ZET_VALIDATE_ROOT/R-template" "CLI validate uses configured template directory"
+assert_output_contains "$validate_out" "All templates valid." "CLI validate succeeds with configured template directory"
+
 zet_test_teardown
 
 zet_test_results

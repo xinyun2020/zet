@@ -85,8 +85,9 @@ rules = "~/.claude/rules/"
 # skill unless it opts out with tier: full-only)
 # skills-local = "~/.claude/skills-local/"
 
-# Optional: mirror `backend: codex` skills here. No default — Codex is usually driven as a stateless
-# one-shot (`codex exec`/`codex review`), not a loaded skill set, so leaving this unset is a no-op.
+# Optional: project generated skills into Codex's native skill dir. No default — this prevents
+# a random Zet project from writing into your real Codex config without an explicit path.
+# Once configured, every generated skill is copied unless the template says `codex: false`.
 # skills-codex = "~/.codex/skills/"
 
 [model-roles]
@@ -115,6 +116,15 @@ ZET_AGENTS_STD=".agents/skills/" zet generate
 ```
 
 The interop output uses the same SKILL.md format (YAML frontmatter + markdown body) that Claude Code uses. No translation, no lossy conversion — the format IS the standard.
+
+For Codex's native skill directory, configure `skills-codex`:
+
+```toml
+[paths]
+skills-codex = "~/.codex/skills/"
+```
+
+That emits the generated skill set to Codex from the same templates. Use `codex: false` only for a skill that depends on a non-Codex runtime feature.
 
 ## Documentation
 

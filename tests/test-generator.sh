@@ -422,10 +422,10 @@ run_gen >/dev/null   # no explicit ZET_SKILLS_LOCAL export in this test body —
 assert_file_exists "$ZET_SKILLS_LOCAL/skills/isolcheck/SKILL.md" "plain run_gen still isolated by setup()'s default"
 teardown
 
-# Test 17: DEFAULT backend is "claude" — a skill with no backend: field behaves exactly as before
-# (full backward compat: every existing template that never set this field is unaffected).
+# Test 17: configuring skills-codex means "project this skill set to Codex" — no per-template
+# backend: codex tag required. This is the multi-harness SSOT behavior: paths select outputs.
 echo ""
-echo "--- Default backend is claude (no backend: field needed, no codex copy) ---"
+echo "--- skills-codex projects default skills to Codex ---"
 setup
 export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
 mkdir -p "$ZET_SKILLS_CODEX"
@@ -438,13 +438,13 @@ description: no explicit backend
 EOF
 run_gen >/dev/null
 assert_file_exists "$ZET_SKILLS/nobackend/SKILL.md" "no-backend skill still in full set"
-assert_file_not_exists "$ZET_SKILLS_CODEX/nobackend/SKILL.md" "no-backend skill does NOT get a codex copy"
+assert_file_exists "$ZET_SKILLS_CODEX/nobackend/SKILL.md" "no-backend skill gets a codex copy when skills-codex is configured"
 teardown
 
-# Test 18: backend: codex mirrors the skill into skills-codex WHEN that path is configured, with no
-# model: line (Codex has no per-skill model override — one global model in ~/.codex/config.toml).
+# Test 18: Codex projection has no model: line (Codex has no per-skill model override — one global
+# model in ~/.codex/config.toml). `backend: codex` remains accepted as a documentation annotation.
 echo ""
-echo "--- backend: codex mirrors into skills-codex when configured ---"
+echo "--- Codex projection omits model frontmatter ---"
 setup
 export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
 mkdir -p "$ZET_SKILLS_CODEX"
@@ -467,22 +467,21 @@ else
 fi
 teardown
 
-# Test 19: backend: codex is a NO-OP when skills-codex isn't configured — most Codex usage is a
-# stateless codex exec/review one-shot, not a loaded skill set, so there is nothing to write by default.
+# Test 19: Codex projection is a NO-OP when skills-codex isn't configured. The output path is the
+# opt-in; no Zet project writes into a real Codex directory accidentally.
 echo ""
-echo "--- backend: codex is a no-op with no skills-codex configured ---"
+echo "--- Codex projection is a no-op with no skills-codex configured ---"
 setup
 # ZET_SKILLS_CODEX deliberately left unset (setup() already unsets it)
 cat > "$ZET_TEMPLATES/codexnoop_prompt_template.md" <<'EOF'
 ---
 type: skill
-backend: codex
-description: codex backend, no output dir configured
+description: codex projection, no output dir configured
 ---
 # Codex no-op
 EOF
 run_output=$(run_gen)
-assert_file_exists "$ZET_SKILLS/codexnoop/SKILL.md" "codex-backend skill still generated in full set"
+assert_file_exists "$ZET_SKILLS/codexnoop/SKILL.md" "skill still generated in full set"
 if echo "$run_output" | grep -q "skills-codex"; then
     zet_fail "generator referenced skills-codex even though it isn't configured"
 else
@@ -512,18 +511,17 @@ else
 fi
 teardown
 
-# Test 21: retagging a skill from codex to claude removes its stale copy from skills-codex (the
-# wipe-then-regenerate guard — cleanup_stale alone can't catch this since the skill is still type: skill).
+# Test 21: codex:false removes a stale copy from skills-codex (the wipe-then-regenerate guard —
+# cleanup_stale alone can't catch this since the skill is still type: skill).
 echo ""
-echo "--- Retagging backend: codex -> claude removes the stale skills-codex copy ---"
+echo "--- codex:false removes the stale skills-codex copy ---"
 setup
 export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
 mkdir -p "$ZET_SKILLS_CODEX"
 cat > "$ZET_TEMPLATES/retag_prompt_template.md" <<'EOF'
 ---
 type: skill
-backend: codex
-description: starts as codex backend
+description: starts projected to Codex
 ---
 # Retag
 EOF
@@ -532,13 +530,40 @@ assert_file_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "codex copy exists before 
 cat > "$ZET_TEMPLATES/retag_prompt_template.md" <<'EOF'
 ---
 type: skill
-description: retagged to claude-only
+codex: false
+description: retagged to skip Codex
 ---
 # Retag
 EOF
 run_gen >/dev/null
 assert_file_exists "$ZET_SKILLS/retag/SKILL.md" "retagged skill still in full set"
 assert_file_not_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "stale codex copy removed after retag"
+teardown
+
+# Test 22: hand-written skills mirrored into Codex also drop per-skill model frontmatter.
+echo ""
+echo "--- Hand-written Codex mirror strips model frontmatter ---"
+setup
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+mkdir -p "$ZET_SKILLS/manualmode" "$ZET_SKILLS_CODEX"
+cat > "$ZET_SKILLS/manualmode/SKILL.md" <<'EOF'
+---
+name: manualmode
+description: Manual skill with model metadata
+model: sonnet
+---
+# Manual
+EOF
+cat > "$ZET_TEMPLATES/live_prompt_template.md" <<'EOF'
+---
+type: skill
+description: live template
+---
+# Live
+EOF
+run_gen >/dev/null
+assert_file_exists "$ZET_SKILLS_CODEX/manualmode/SKILL.md" "hand-written skill mirrored into Codex"
+assert_not_contains "$ZET_SKILLS_CODEX/manualmode/SKILL.md" "^model:" "hand-written Codex mirror strips model"
 teardown
 
 zet_test_results

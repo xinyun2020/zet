@@ -43,11 +43,22 @@ The name is derived from the filename: strip `_prompt_template.md` suffix. This 
 | `context` | skills | Context loading strategy |
 | `prompt` | skills | Additional prompt text appended after the follow directive |
 | `tier` | skills | `local` (default) or `full-only`. `local` also mirrors the skill into `[paths].skills-local` with `role:` resolved through the local (Ollama) model column, for a local-model client (e.g. `ccl`) loading it via `--plugin-dir`. `full-only` opts a skill out of that mirror entirely (e.g. it needs credentials/hooks only the full session has) |
-| `backend` | skills | `claude` (default), `opencode`, `codex`, or `pi`. `claude` is the plain full-Claude skill, unaffected by this field — every template written before `backend:` existed keeps behaving exactly as before. `opencode` documents that a skill also targets the `tier: local` mirror above. `codex` additionally mirrors the skill into `[paths].skills-codex` when that path is configured (unset = no-op: Codex is typically driven as a stateless one-shot reviewer via `codex exec`/`codex review`, not a loaded skill set, and has no per-skill model override, so no `model:` line is ever emitted into the codex copy). `pi` is accepted as an explicit consumer annotation, but Pi prompt output is generated for every role-bearing skill so existing templates gain routing without a 57-file retagging pass. |
+| `backend` | skills | Documentation-only consumer annotation: `claude` (default), `opencode`, `codex`, or `pi`. Configured output paths, not this field, decide which harness artifacts Zet emits. `opencode` documents that a skill also targets the `tier: local` mirror above. `codex` remains accepted for older templates but is no longer required when `[paths].skills-codex` is configured. `pi` is accepted as an explicit consumer annotation, but Pi prompt output is generated for every role-bearing skill so existing templates gain routing without a retagging pass. |
+| `codex` | skills | `false` opts this skill out of `[paths].skills-codex` output. Default is enabled when the project configures `skills-codex`; Codex copies strip `model:` because Codex uses one global model from `~/.codex/config.toml`, not per-skill model overrides. |
 
 ### Pi prompt output
 
 Pi prompt output is intentionally separate from `SKILL.md`. Pi loads a skill as context, but `pi-prompt-template-model` applies `model:` and `thinking:` only to prompt-template files. Every skill with a `role:` therefore gets an additive prompt file; `backend: pi` may be used as an explicit annotation but is not required.
+
+### Codex skill output
+
+Codex output is path-driven. If `[paths].skills-codex` or `ZET_SKILLS_CODEX` is set, Zet emits every generated skill into that directory unless the template says:
+
+```yaml
+codex: false
+```
+
+This is the multi-harness source-of-truth contract: one template produces Claude, local-tier, Pi, Agent Skills Open Standard, and Codex artifacts according to the project config. Templates should only opt out of Codex when a skill depends on a harness feature Codex cannot supply.
 
 For a template role `R`, Zet reads the Pi chain from the configured model-roles file in this order:
 
@@ -135,11 +146,11 @@ targets = ["pi"]
 pi_event = "tool_call"
 pi_input_shape = "bash_command"
 
-[hooks.require-codex-on-script-change]
-source = "R-utils/dotfiles/.claude/hooks/require-codex-on-script-change.sh"
+[hooks.require-fresh-review-on-script-change]
+source = "R-utils/dotfiles/.claude/hooks/require-fresh-review-on-script-change.sh"
 claude_event = "Stop"
 targets = []
-note = "Pi has no event exposing a transcript file path in a shape this script's parser understands — porting would require a second, independent parser, which duplicates gate logic."
+note = "Pi is wired directly in its settings.json via pi-hooks Stop and safe-hook.sh, so Zet documents the shared source script but does not generate a tool_call shim."
 ```
 
 Output dir is configured via `[paths].pi-extensions` (or `ZET_PI_EXTENSIONS`), same no-destructive-default pattern as `[paths].skills-codex` — unset means the feature is off, and a hook targeting `pi` with no output dir configured is a loud `WARNING`, not a silent no-op (a missing safety shim is a safety-relevant gap, unlike a missing skill mirror).
