@@ -24,6 +24,7 @@ setup() {
     # from the calling shell.
     unset ZET_SKILLS_CODEX
     unset ZET_PI_PROMPTS
+    unset ZET_GENERATE_JOBS
     export ZET_AGENTS="$TEST_HOME/output/agents"
     export ZET_RULES="$TEST_HOME/output/rules"
     export ZET_MODEL_ROLES="$ZET_ROOT/model-roles.conf"
@@ -564,6 +565,41 @@ EOF
 run_gen >/dev/null
 assert_file_exists "$ZET_SKILLS_CODEX/manualmode/SKILL.md" "hand-written skill mirrored into Codex"
 assert_not_contains "$ZET_SKILLS_CODEX/manualmode/SKILL.md" "^model:" "hand-written Codex mirror strips model"
+teardown
+
+# Test 23: sibling skills render in bounded parallel jobs while preserving per-harness frontmatter.
+echo ""
+echo "--- Bounded parallel skill rendering preserves harness outputs ---"
+setup
+export ZET_GENERATE_JOBS=2
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+export ZET_AGENTS_STD="$TEST_HOME/output/agents-std"
+mkdir -p "$ZET_SKILLS_CODEX" "$ZET_AGENTS_STD"
+cat > "$ZET_TEMPLATES/alpha_prompt_template.md" <<'EOF'
+---
+type: skill
+description: alpha parallel skill
+role: think
+---
+# Alpha
+EOF
+cat > "$ZET_TEMPLATES/beta_prompt_template.md" <<'EOF'
+---
+type: skill
+description: beta parallel skill
+---
+# Beta
+EOF
+parallel_output=$(bash "$GENERATOR" 2>&1)
+assert_output_contains "$parallel_output" "Parallelism: 2 skill render job(s)" "reports configured parallelism"
+assert_file_exists "$ZET_SKILLS/alpha/SKILL.md" "parallel alpha Claude skill created"
+assert_file_exists "$ZET_SKILLS/beta/SKILL.md" "parallel beta Claude skill created"
+assert_contains "$ZET_SKILLS/alpha/SKILL.md" "model: opus" "parallel full skill keeps role-resolved model"
+assert_file_exists "$ZET_PI_PROMPTS/alpha.md" "parallel Pi prompt created"
+assert_contains "$ZET_PI_PROMPTS/alpha.md" "model: github-copilot/primary-think, amazon-bedrock/bedrock-think, fireworks-ai/fireworks-think" "parallel Pi prompt keeps provider fallback chain"
+assert_file_exists "$ZET_AGENTS_STD/alpha/SKILL.md" "parallel interop skill created"
+assert_file_exists "$ZET_SKILLS_CODEX/alpha/SKILL.md" "parallel Codex skill created"
+assert_not_contains "$ZET_SKILLS_CODEX/alpha/SKILL.md" "^model:" "parallel Codex skill still omits model"
 teardown
 
 zet_test_results

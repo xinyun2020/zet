@@ -126,6 +126,12 @@ skills-codex = "~/.codex/skills/"
 
 That emits the generated skill set to Codex from the same templates. Use `codex: false` only for a skill that depends on a non-Codex runtime feature.
 
+`zet generate` renders sibling skills in bounded parallel jobs. Override the default CPU-sized fan-out for slow disks or debugging:
+
+```bash
+ZET_GENERATE_JOBS=2 zet generate
+```
+
 ## Documentation
 
 - [Concept](docs/concept.md) — why AI config needs engineering rigor

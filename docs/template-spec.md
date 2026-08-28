@@ -60,6 +60,12 @@ codex: false
 
 This is the multi-harness source-of-truth contract: one template produces Claude, local-tier, Pi, Agent Skills Open Standard, and Codex artifacts according to the project config. Templates should only opt out of Codex when a skill depends on a harness feature Codex cannot supply.
 
+### Generation parallelism
+
+`zet generate` parses templates and performs duplicate checks in the parent process, then renders each sibling skill in a bounded background job. Each job owns one skill's harness artifacts: Claude `SKILL.md`, local-tier copy, Pi prompt, Agent Skills Open Standard mirror, and Codex projection. The parent waits for every render job before AGENTS.md rendering, hand-written skill mirroring, and stale cleanup.
+
+Set `ZET_GENERATE_JOBS=N` to cap the fan-out. The default is the machine CPU count, with a minimum of 1. Use `ZET_GENERATE_JOBS=1` for serial debugging.
+
 For a template role `R`, Zet reads the Pi chain from the configured model-roles file in this order:
 
 ```text
