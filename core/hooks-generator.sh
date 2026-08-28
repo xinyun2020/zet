@@ -282,8 +282,21 @@ export default function (pi: ExtensionAPI) {
     const command = (event.input as { command?: string }).command;
     if (!command) return;
 
-    const result = spawnSync("bash", [SCRIPT_PATH, "--why"], {
-      input: command,
+    // Each source gate owns its stdin and exit-code contract. Danger scan receives the raw
+    // command and returns exit 0 for dangerous; Claude-shaped gates receive hook JSON and return
+    // exit 2 for a block. A generic --why/exit-2 adapter silently inverts these contracts.
+    const sourceName = "$name";
+    const dangerScan = sourceName === "danger-scan";
+    const input = dangerScan
+      ? command
+      : JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command },
+          cwd: ctx.cwd,
+        });
+    const args = dangerScan ? [SCRIPT_PATH, "--why"] : [SCRIPT_PATH];
+    const result = spawnSync("bash", args, {
+      input,
       encoding: "utf-8",$env_block
     });
 
@@ -295,8 +308,23 @@ export default function (pi: ExtensionAPI) {
     if (result.status === null) {
       return { block: true, reason: "$name could not run (spawnSync failed) — failing closed, not auto-approving." };
     }
-    if (result.status === 0) {
-      const why = result.stdout.trim();
+    // Bash gates use exit 2 for a genuine block and exit 0 for abstain/allow.
+    // Treating exit 0 as a block makes every safe Pi Bash call fail closed with an empty reason.
+    const blocked = dangerScan ? result.status === 0 : result.status === 2;
+    if (blocked) {
+      const why = result.stderr.trim() || result.stdout.trim();
+      // Mirrors Claude Code's own PreToolUse permission prompt: a flagged command doesn't die
+      // silently on a text reason — it puts up a real yes/no dialog right where the command was
+      // about to run, so an explicit in-session "yes, do it" actually clears the gate. Only
+      // possible in UI-capable modes (interactive/RPC); print/json modes have no dialog surface
+      // and keep the unconditional hard-block (ctx.hasUI is false there).
+      if (ctx.hasUI) {
+        const approved = await ctx.ui.confirm(
+          \`Blocked by $name\`,
+          \`\${command}\\n\\nMatched: \${why}\\n\\nRun anyway?\`,
+        );
+        if (approved) return;
+      }
       return { block: true, reason: \`Blocked by $name (matches: \${why}). Needs explicit approval.\` };
     }
   });

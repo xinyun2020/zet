@@ -34,10 +34,13 @@ Every new feature needs a test. Run `bin/zet test` before committing. Target: al
 bin/zet          → CLI dispatcher (routes subcommands)
 core/config.sh   → TOML reader (zet_config_init, zet_config_get, zet_config_section)
 core/generator.sh → template → deployed config (skills, agents, rules)
+core/agent-detect.sh → live tmux pane → which agent CLI is running (claude/opencode/pi) — the
+                    consume-side twin of generator.sh's `backend:` tag (produce-side: which
+                    harness a skill is written FOR)
 core/scanner.sh   → dead code detection
 core/coverage.sh  → harness health metrics
 core/test-runner.sh → assert helpers + test isolation (zet_test_setup/teardown)
 hooks/           → built-in hook library (pre-push, post-edit, check-datetime)
 templates/       → example templates
-tests/           → self-tests (test-generator, test-config, test-hooks)
+tests/           → self-tests (test-generator, test-config, test-hooks, test-agent-detect)
 ```

@@ -398,7 +398,8 @@ mkdir -p "$ZET_SKILLS_LOCAL"
 _LOCKDIR="${TMPDIR:-/tmp}/zet-generate.lock"
 rmdir "$_LOCKDIR" 2>/dev/null || true
 mkdir "$_LOCKDIR"                                  # simulate another process holding the lock
-( sleep 2; rmdir "$_LOCKDIR" 2>/dev/null ) &        # releases it after 2s — the waiter must not finish before this
+echo "$$" > "$_LOCKDIR/pid"                         # match generator.sh's lock contract
+( sleep 2; rm -f "$_LOCKDIR/pid"; rmdir "$_LOCKDIR" 2>/dev/null ) &        # releases it after 2s — the waiter must not finish before this
 _START=$(date +%s)
 run_gen >/dev/null
 _ELAPSED=$(( $(date +%s) - _START ))

@@ -49,25 +49,40 @@ set -e
 #
 # STRICTLY OWNERSHIP-SCOPED (no steal/steal-race): the release trap is set ONLY after THIS process's own
 # mkdir succeeds, so only the actual lock holder can ever remove it — no other waiter can double-unlock or
-# steal it. There is deliberately NO "steal a stale lock after N seconds" fallback: an earlier version tried
-# that and it was UNSOUND (two waiters could both believe they'd reclaimed the lock and proceed concurrently,
-# recreating the exact race this lock exists to prevent). generate normally finishes in seconds, so a hung
-# holder is abnormal; if the wait exceeds the timeout, fail LOUDLY with manual-recovery instructions rather
-# than silently risk corrupting output by racing another process.
+# steal it. A pure TIME-based "steal after N seconds" fallback was tried once and was UNSOUND (two waiters
+# could both decide to steal a legitimately slow-but-alive holder's lock and proceed concurrently,
+# recreating the exact race this lock exists to prevent — a time threshold cannot distinguish "hung" from
+# "just slow"). PID-liveness reaping below is a different, sound mechanism: a dead PID is unambiguous
+# (never "just slow" — a process that no longer exists cannot still be writing), so any single waiter may
+# rmdir a lock whose holder is confirmed dead. That rmdir doesn't grant ownership by itself — it only frees
+# the mkdir slot, which every waiter (old and new) then still has to win atomically like any fresh
+# acquisition, so no double-holder is possible even if several waiters reap at once.
+# Observed 2026-08-27: a hook/tool timeout shorter than generate's real runtime SIGKILLs generator.sh
+# mid-run, skipping the EXIT trap and orphaning the lock for every subsequent run until someone notices
+# and removes it by hand — this reaps that case automatically instead.
 _LOCKDIR="${TMPDIR:-/tmp}/zet-generate.lock"
+_LOCK_PIDFILE="$_LOCKDIR/pid"
 _LOCK_WAITED=0
 _LOCK_TIMEOUT_S=120
 while ! mkdir "$_LOCKDIR" 2>/dev/null; do
+    _holder_pid="$(cat "$_LOCK_PIDFILE" 2>/dev/null)"
+    if [ -n "$_holder_pid" ] && ! kill -0 "$_holder_pid" 2>/dev/null; then
+        echo "zet generate: reaping stale lock (holder pid $_holder_pid is dead)" >&2
+        rm -f "$_LOCK_PIDFILE" 2>/dev/null
+        rmdir "$_LOCKDIR" 2>/dev/null || true
+        continue
+    fi
     _LOCK_WAITED=$((_LOCK_WAITED + 1))
     if [ "$_LOCK_WAITED" -ge "$_LOCK_TIMEOUT_S" ]; then
-        echo "ERROR: zet generate lock held >${_LOCK_TIMEOUT_S}s by another run." >&2
+        echo "ERROR: zet generate lock held >${_LOCK_TIMEOUT_S}s by another run (pid ${_holder_pid:-unknown})." >&2
         echo "  If that run crashed without cleanup (e.g. kill -9), remove the stale lock manually: rmdir $_LOCKDIR" >&2
         exit 1
     fi
     sleep 1
 done
 # Reached ONLY by the process whose mkdir just succeeded — safe to bind the release trap here.
-trap 'rmdir "$_LOCKDIR" 2>/dev/null || true' EXIT
+echo "$$" > "$_LOCK_PIDFILE"
+trap 'rm -f "$_LOCK_PIDFILE" 2>/dev/null; rmdir "$_LOCKDIR" 2>/dev/null || true' EXIT
 
 # --- Config resolution ---
 ZET_ROOT="${ZET_ROOT:-$(pwd)}"
