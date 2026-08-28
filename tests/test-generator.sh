@@ -25,9 +25,11 @@ setup() {
     unset ZET_SKILLS_CODEX
     unset ZET_PI_PROMPTS
     unset ZET_GENERATE_JOBS
+    unset ZET_GENERATE_FORCE
     export ZET_AGENTS="$TEST_HOME/output/agents"
     export ZET_RULES="$TEST_HOME/output/rules"
     export ZET_MODEL_ROLES="$ZET_ROOT/model-roles.conf"
+    export ZET_GENERATE_CACHE_DIR="$TEST_HOME/cache/generate"
     # Isolate the generator's concurrency lock (${TMPDIR:-/tmp}/zet-generate.lock) to this test's own tmp dir
     # so the test suite can never touch/rmdir a REAL zet generate lock if one happens to be held concurrently
     # by an actual session using this vault.
@@ -57,6 +59,10 @@ teardown() {
 
 run_gen() {
     bash "$GENERATOR" --quiet 2>&1
+}
+
+mtime_seconds() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
 }
 
 # --- Tests ---
@@ -512,26 +518,29 @@ else
 fi
 teardown
 
-# Test 21: codex:false removes a stale copy from skills-codex (the wipe-then-regenerate guard —
-# cleanup_stale alone can't catch this since the skill is still type: skill).
+# Test 21: stale harness-specific generated outputs are removed without wiping the whole output dir.
 echo ""
-echo "--- codex:false removes the stale skills-codex copy ---"
+echo "--- Harness-specific stale outputs are removed ---"
 setup
 export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
 mkdir -p "$ZET_SKILLS_CODEX"
 cat > "$ZET_TEMPLATES/retag_prompt_template.md" <<'EOF'
 ---
 type: skill
+role: think
 description: starts projected to Codex
 ---
 # Retag
 EOF
 run_gen >/dev/null
 assert_file_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "codex copy exists before retag"
+assert_file_exists "$ZET_SKILLS_LOCAL/skills/retag/SKILL.md" "local copy exists before retag"
+assert_file_exists "$ZET_PI_PROMPTS/retag.md" "Pi prompt exists before retag"
 cat > "$ZET_TEMPLATES/retag_prompt_template.md" <<'EOF'
 ---
 type: skill
 codex: false
+tier: full-only
 description: retagged to skip Codex
 ---
 # Retag
@@ -539,6 +548,8 @@ EOF
 run_gen >/dev/null
 assert_file_exists "$ZET_SKILLS/retag/SKILL.md" "retagged skill still in full set"
 assert_file_not_exists "$ZET_SKILLS_CODEX/retag/SKILL.md" "stale codex copy removed after retag"
+assert_file_not_exists "$ZET_SKILLS_LOCAL/skills/retag/SKILL.md" "stale local copy removed after retag"
+assert_file_not_exists "$ZET_PI_PROMPTS/retag.md" "stale Pi prompt removed after role removal"
 teardown
 
 # Test 22: hand-written skills mirrored into Codex also drop per-skill model frontmatter.
@@ -600,6 +611,69 @@ assert_contains "$ZET_PI_PROMPTS/alpha.md" "model: github-copilot/primary-think,
 assert_file_exists "$ZET_AGENTS_STD/alpha/SKILL.md" "parallel interop skill created"
 assert_file_exists "$ZET_SKILLS_CODEX/alpha/SKILL.md" "parallel Codex skill created"
 assert_not_contains "$ZET_SKILLS_CODEX/alpha/SKILL.md" "^model:" "parallel Codex skill still omits model"
+teardown
+
+# Test 24: no-op generation compares and skips unchanged file replacement.
+echo ""
+echo "--- No-op generate preserves unchanged output mtimes ---"
+setup
+export ZET_GENERATE_JOBS=1
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+export ZET_AGENTS_STD="$TEST_HOME/output/agents-std"
+mkdir -p "$ZET_SKILLS_CODEX" "$ZET_AGENTS_STD"
+cat > "$ZET_TEMPLATES/cachecheck_prompt_template.md" <<'EOF'
+---
+type: skill
+description: cache check
+role: think
+---
+# Cache check
+EOF
+run_gen >/dev/null
+full_file="$ZET_SKILLS/cachecheck/SKILL.md"
+local_file="$ZET_SKILLS_LOCAL/skills/cachecheck/SKILL.md"
+codex_file="$ZET_SKILLS_CODEX/cachecheck/SKILL.md"
+pi_file="$ZET_PI_PROMPTS/cachecheck.md"
+full_before=$(mtime_seconds "$full_file")
+local_before=$(mtime_seconds "$local_file")
+codex_before=$(mtime_seconds "$codex_file")
+pi_before=$(mtime_seconds "$pi_file")
+sleep 1
+run_gen >/dev/null
+assert_equals "$full_before" "$(mtime_seconds "$full_file")" "full skill mtime unchanged on no-op generate"
+assert_equals "$local_before" "$(mtime_seconds "$local_file")" "local skill mtime unchanged on no-op generate"
+assert_equals "$codex_before" "$(mtime_seconds "$codex_file")" "Codex skill mtime unchanged on no-op generate"
+assert_equals "$pi_before" "$(mtime_seconds "$pi_file")" "Pi prompt mtime unchanged on no-op generate"
+teardown
+
+# Test 25: run-level cache skips only when the generated-output manifest still matches.
+echo ""
+echo "--- Run-level cache validates generated output manifest ---"
+setup
+export ZET_GENERATE_JOBS=1
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+mkdir -p "$ZET_SKILLS_CODEX"
+cat > "$ZET_TEMPLATES/manifestcheck_prompt_template.md" <<'EOF'
+---
+type: skill
+description: manifest cache check
+role: think
+---
+# Manifest cache check
+EOF
+bash "$GENERATOR" >/dev/null 2>&1
+cache_hit_output=$(bash "$GENERATOR" 2>&1)
+assert_output_contains "$cache_hit_output" "Generated: skipped (cache hit)" "second unchanged run skips generation"
+
+echo "# Manual drift" >> "$ZET_SKILLS/manifestcheck/SKILL.md"
+drift_repair_output=$(bash "$GENERATOR" 2>&1)
+assert_output_not_contains "$drift_repair_output" "cache hit" "edited generated file invalidates cache"
+assert_not_contains "$ZET_SKILLS/manifestcheck/SKILL.md" "Manual drift" "edited generated file is repaired"
+
+rm "$ZET_SKILLS_CODEX/manifestcheck/SKILL.md"
+missing_repair_output=$(bash "$GENERATOR" 2>&1)
+assert_output_not_contains "$missing_repair_output" "cache hit" "missing generated file invalidates cache"
+assert_file_exists "$ZET_SKILLS_CODEX/manifestcheck/SKILL.md" "missing generated file is repaired"
 teardown
 
 zet_test_results

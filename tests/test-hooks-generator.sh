@@ -17,6 +17,8 @@ setup() {
     zet_test_setup
     export ZET_ROOT="$TEST_HOME/project"
     export ZET_PI_EXTENSIONS="$TEST_HOME/output/pi-extensions"
+    export ZET_GENERATE_CACHE_DIR="$TEST_HOME/cache/generate"
+    unset ZET_GENERATE_FORCE
     mkdir -p "$ZET_ROOT" "$ZET_PI_EXTENSIONS"
 
     mkdir -p "$ZET_ROOT/scripts"
@@ -275,19 +277,7 @@ targets = ["pi"]
 pi_input_shape = "bash_command"
 EOF
 bash "$GENERATOR" --quiet >/dev/null 2>&1
-if command -v node >/dev/null 2>&1; then
-    node -e "
-      const fs = require('fs');
-      const src = fs.readFileSync('$ZET_PI_EXTENSIONS/fixture-bash.ts', 'utf-8');
-      if (!src.includes('result.status === null')) {
-        console.log('  FAIL: generated shim has no null-status fail-closed guard');
-        process.exit(1);
-      }
-      console.log('  PASS: generated bash_command shim contains a null-status fail-closed guard');
-    "
-else
-    echo "  SKIP: node not available, cannot verify null-status guard at runtime"
-fi
+assert_contains "$ZET_PI_EXTENSIONS/fixture-bash.ts" "result.status === null" "generated bash_command shim contains a null-status fail-closed guard"
 teardown
 
 # --- push-approval escape hatch (2026-08-18): [paths].session-board unset means the generated
@@ -326,6 +316,28 @@ out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
 assert_contains "$out" "_CCS_SESSION_BOARD" "[paths].session-board configured: env block passes the resolved board path through"
 assert_contains "$out" "$ZET_ROOT/board/session-board.sh" "board path is resolved to an absolute path, not left relative"
 assert_contains "$out" "ctx.cwd" "shim passes ctx.cwd through so the target script can bind an approval to the real cwd"
+teardown
+
+# --- no-op hook generation uses a manifest cache but repairs output drift ---
+setup
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[hooks.fixture-bash]
+source = "scripts/fixture-bash.sh"
+targets = ["pi"]
+pi_input_shape = "bash_command"
+EOF
+bash "$GENERATOR" >/dev/null 2>&1
+cache_hit_output="$(bash "$GENERATOR" 2>&1)"
+assert_contains_str "$cache_hit_output" "Generated: skipped hook shims (cache hit)" "second unchanged hook generation skips"
+out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
+echo "// Manual drift" >> "$out"
+drift_repair_output="$(bash "$GENERATOR" 2>&1)"
+assert_not_contains_str "$drift_repair_output" "cache hit" "edited hook shim invalidates cache"
+assert_not_contains "$out" "Manual drift" "edited hook shim is repaired"
+rm "$out"
+missing_repair_output="$(bash "$GENERATOR" 2>&1)"
+assert_not_contains_str "$missing_repair_output" "cache hit" "missing hook shim invalidates cache"
+assert_file_exists "$out" "missing hook shim is repaired"
 teardown
 
 echo ""

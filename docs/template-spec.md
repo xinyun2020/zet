@@ -62,9 +62,13 @@ This is the multi-harness source-of-truth contract: one template produces Claude
 
 ### Generation parallelism
 
-`zet generate` parses templates and performs duplicate checks in the parent process, then renders each sibling skill in a bounded background job. Each job owns one skill's harness artifacts: Claude `SKILL.md`, local-tier copy, Pi prompt, Agent Skills Open Standard mirror, and Codex projection. The parent waits for every render job before AGENTS.md rendering, hand-written skill mirroring, and stale cleanup.
+`zet generate` first checks run-level caches. The template-artifact cache key includes generator/config/model-role/template inputs, output paths, and hand-written source skills that feed interop mirrors. A cache hit is accepted only when the previous generated-output manifest still exists and every listed output file has the expected hash. On a hit, Zet exits early without reparsing and rerendering all harness artifacts.
+
+When the run-level cache misses, Zet parses templates and performs duplicate checks in the parent process, then renders each sibling skill in a bounded background job. Each job owns one skill's harness artifacts: Claude `SKILL.md`, local-tier copy, Pi prompt, Agent Skills Open Standard mirror, and Codex projection. Generated files are written through compare-before-replace helpers, so unchanged outputs keep their mtimes. The parent waits for every render job before AGENTS.md rendering, hand-written skill mirroring, and stale cleanup.
 
 Set `ZET_GENERATE_JOBS=N` to cap the fan-out. The default is the machine CPU count, with a minimum of 1. Use `ZET_GENERATE_JOBS=1` for serial debugging.
+
+Set `ZET_GENERATE_FORCE=1` to bypass the run-level cache and force a full render. This is useful when debugging generator behavior or deliberately repairing output directories.
 
 For a template role `R`, Zet reads the Pi chain from the configured model-roles file in this order:
 
@@ -160,6 +164,8 @@ note = "Pi is wired directly in its settings.json via pi-hooks Stop and safe-hoo
 ```
 
 Output dir is configured via `[paths].pi-extensions` (or `ZET_PI_EXTENSIONS`), same no-destructive-default pattern as `[paths].skills-codex` — unset means the feature is off, and a hook targeting `pi` with no output dir configured is a loud `WARNING`, not a silent no-op (a missing safety shim is a safety-relevant gap, unlike a missing skill mirror).
+
+Hook shims use the same no-op cache shape as template artifacts: a hook-source fingerprint plus a generated-shim manifest. Warning states are not cached, so unresolved safety gaps continue to surface on each run.
 
 ## Validation Rules
 

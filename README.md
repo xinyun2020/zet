@@ -126,10 +126,16 @@ skills-codex = "~/.codex/skills/"
 
 That emits the generated skill set to Codex from the same templates. Use `codex: false` only for a skill that depends on a non-Codex runtime feature.
 
-`zet generate` renders sibling skills in bounded parallel jobs. Override the default CPU-sized fan-out for slow disks or debugging:
+`zet generate` renders sibling skills in bounded parallel jobs and writes files only when rendered bytes change. After a successful run it records source fingerprints plus generated-output manifests for template artifacts and hook shims; if the next run has the same inputs and every generated output still matches the manifest, Zet exits early instead of reparsing and rerendering every harness. Override the default CPU-sized fan-out for slow disks or debugging:
 
 ```bash
 ZET_GENERATE_JOBS=2 zet generate
+```
+
+Force a full render, bypassing the run-level cache:
+
+```bash
+ZET_GENERATE_FORCE=1 zet generate
 ```
 
 ## Documentation
