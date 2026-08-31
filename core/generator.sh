@@ -320,7 +320,7 @@ resolve_pi_model_chain() {
     local role="$1" pi_role="$1" i model provider entry chain=""
     case "$role" in
         execute)     pi_role="implement" ;;
-        audit)       pi_role="review" ;;
+        audit)       pi_role="audit" ;;
         orchestrate) pi_role="discover" ;;
     esac
     for i in 0 1 2 3 4 5 6 7 8 9; do
@@ -343,9 +343,15 @@ resolve_pi_model_chain() {
 }
 
 resolve_pi_thinking() {
-    local role="$1" val
-    val=$(resolve_model_role "pi_${role}_thinking" || true)
-    [ -z "$val" ] && val=$(resolve_model_role "${role}_effort" || true)
+    local role="$1" val pi_role="$1"
+    case "$role" in
+        audit|discover) pi_role="audit" ;;
+        execute|implement|worker) pi_role="execute" ;;
+        think|review) pi_role="think" ;;
+        overnight) pi_role="overnight" ;;
+    esac
+    val=$(resolve_model_role "pi_${pi_role}_thinking" || true)
+    [ -z "$val" ] && val=$(resolve_model_role "${pi_role}_effort" || true)
     case "$val" in
         off|minimal|low|medium|high|xhigh|max) printf '%s\n' "$val" ;;
         "") printf '%s\n' medium ;;
@@ -465,14 +471,15 @@ write_skill_wrapper() {
 
 render_skill_outputs() {
     local file="$1" filename="$2" name="$3" desc="$4" model="$5" role="$6" args="$7" ctx="$8" domain="$9"
-    local skill_tags="${10}" tier="${11}" codex_enabled="${12}" prompt_extra="${13}"
+    local skill_tags="${10}" tier="${11}" codex_enabled="${12}" prompt_extra="${13}" pi_role="${14}"
     local skill_dir local_model local_skill_dir codex_skill_dir
+    [ -n "$pi_role" ] || pi_role="$role"
 
     skill_dir="$SKILLS_DIR/$name"
     write_skill_wrapper "$skill_dir/SKILL.md" "$filename" "$name" "$desc" "$model" "$args" "$ctx" "$domain" "$skill_tags" "" "$prompt_extra" "true"
     if $DRY_RUN; then
         [ -n "$AGENTS_STD_DIR" ] && { $QUIET || echo "  [dry] $AGENTS_STD_DIR/$name/SKILL.md"; }
-        [ -n "$role" ] && generate_pi_prompt "$file" "$PI_PROMPTS_DIR/$name.md" "$name" "$desc" "$role"
+        [ -n "$role" ] && generate_pi_prompt "$file" "$PI_PROMPTS_DIR/$name.md" "$name" "$desc" "$pi_role"
         [ "$tier" = "local" ] && write_skill_wrapper "$SKILLS_LOCAL_SKILLS_DIR/$name/SKILL.md" "$filename" "$name" "$desc" "" "$args" "$ctx" "$domain" "$skill_tags" " (LOCAL tier)" "$prompt_extra" "true"
         [ "$codex_enabled" != "false" ] && [ -n "$SKILLS_CODEX_DIR" ] && write_skill_wrapper "$SKILLS_CODEX_DIR/$name/SKILL.md" "$filename" "$name" "$desc" "" "" "" "" "" " (Codex projection)" "$prompt_extra" "false"
         return 0
@@ -485,7 +492,7 @@ render_skill_outputs() {
     fi
 
     if [ -n "$role" ]; then
-        generate_pi_prompt "$file" "$PI_PROMPTS_DIR/$name.md" "$name" "$desc" "$role"
+        generate_pi_prompt "$file" "$PI_PROMPTS_DIR/$name.md" "$name" "$desc" "$pi_role"
     fi
 
     if [ "$tier" = "local" ]; then
@@ -733,6 +740,7 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
             ctx=$(get_frontmatter_value "$file" "context")
             domain=$(get_frontmatter_value "$file" "domain")
             skill_tags=$(get_frontmatter_value "$file" "tags")
+            pi_role=$(get_frontmatter_value "$file" "pi-role")
             # TIER: which sets this skill belongs to. Default "local" — EVERY skill is exposed to a
             # local-model session by default, using the SAME template with its role: resolved through the
             # local model column. A heavy skill (one that fans out many cloud subagents) still appears in the
@@ -824,7 +832,7 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
                 LIVE_CODEX_SKILL_NAMES="$LIVE_CODEX_SKILL_NAMES $name"
                 $QUIET || echo "  skill: $name (+codex)"
             fi
-            enqueue_render_job "skill:$name" render_skill_outputs "$file" "$filename" "$name" "$desc" "$model" "$role" "$args" "$ctx" "$domain" "$skill_tags" "$tier" "$codex_enabled" "$prompt_extra"
+            enqueue_render_job "skill:$name" render_skill_outputs "$file" "$filename" "$name" "$desc" "$model" "$role" "$args" "$ctx" "$domain" "$skill_tags" "$tier" "$codex_enabled" "$prompt_extra" "$pi_role"
             ;;
 
         agent)
