@@ -187,6 +187,28 @@ assert_contains "$ZET_PI_PROMPTS/pi-thinker.md" "# Pi thinker" "template body pr
 assert_contains "$ZET_SKILLS/pi-thinker/SKILL.md" "model: opus" "Claude skill remains role-resolved"
 teardown
 
+# Test 4c: Duplicate model-role keys remain scalar
+# A malformed or hand-merged model-roles.conf must not produce invalid YAML frontmatter.
+echo ""
+echo "--- Duplicate model-role keys ---"
+setup
+cat >> "$ZET_MODEL_ROLES" <<'EOF'
+pi_think=duplicate-think
+pi_think_provider=duplicate-provider
+EOF
+cat > "$ZET_TEMPLATES/pi-duplicate_prompt_template.md" <<'EOF'
+---
+type: skill
+description: Pi duplicate key skill
+role: think
+---
+# Pi duplicate key test
+EOF
+run_gen >/dev/null
+assert_contains "$ZET_PI_PROMPTS/pi-duplicate.md" "model: github-copilot/primary-think, amazon-bedrock/bedrock-think, fireworks-ai/fireworks-think" "duplicate keys do not create multiline model metadata"
+assert_not_contains "$ZET_PI_PROMPTS/pi-duplicate.md" "^primary-think$" "model metadata stays on one line"
+teardown
+
 # Test 5: Stale cleanup
 echo ""
 echo "--- Stale cleanup ---"

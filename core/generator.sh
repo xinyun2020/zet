@@ -307,7 +307,9 @@ resolve_model_role() {
     fi
     # Fall back to standalone model-roles file
     if [ -f "$MODEL_ROLES_FILE" ]; then
-        grep -v "^#" "$MODEL_ROLES_FILE" | grep "^${role}=" | cut -d= -f2
+        # model-roles.conf is an INI-like file; use the first exact key and never let
+        # duplicate entries turn a scalar into a newline-delimited YAML value.
+        awk -F= -v key="$role" '!/^#/ && $1 == key { print substr($0, index($0, "=") + 1); exit }' "$MODEL_ROLES_FILE"
         return 0
     fi
     return 1
