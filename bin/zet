@@ -265,6 +265,10 @@ cmd_new() {
     local type="${1:-}"
     local name="${2:-}"
 
+    source "$ZET_CORE/config.sh"
+    zet_config_init "$ZET_ROOT"
+    source "$ZET_CORE/frontmatter.sh"
+
     if [ -z "$type" ] || [ -z "$name" ]; then
         echo "Usage: zet new <skill|agent|rule> <name>" >&2
         exit 1
@@ -275,7 +279,8 @@ cmd_new() {
         *) echo "ERROR: type must be skill, agent, or rule" >&2; exit 1 ;;
     esac
 
-    local template_dir="${ZET_TEMPLATES:-$ZET_ROOT/templates}"
+    local template_dir="$(resolve_path "${ZET_TEMPLATES:-$(zet_config_get "paths" "templates" "$ZET_ROOT/templates")}")"
+    local scaffold_dir="$(resolve_path "$(zet_config_get "paths" "scaffold_templates" "")")"
     local target="$template_dir/${name}_prompt_template.md"
 
     if [ -f "$target" ]; then
@@ -284,6 +289,13 @@ cmd_new() {
     fi
 
     mkdir -p "$template_dir"
+
+    # Scaffold content lives in the vault (single source of truth); the heredoc
+    # below is only the fallback for installations without scaffold templates.
+    local scaffold_file=""
+    if [ -n "$scaffold_dir" ] && [ -f "$scaffold_dir/$type.md" ]; then
+        scaffold_file="$scaffold_dir/$type.md"
+    fi
 
     case "$type" in
         skill)
@@ -294,7 +306,17 @@ description: TODO — describe what this skill does
 ---
 # ${name}
 
+## Prior handover
+
+<!-- What came before: existing skills/scripts/notes this replaces or extends, prior session/ticket state. Link them. -->
+
+## Purpose in the chain
+
 Instructions for the ${name} skill.
+
+## Next pick-up
+
+<!-- What the next session/consumer needs: next action, entry command/file, open questions. -->
 EOF
             ;;
         agent)
@@ -306,7 +328,17 @@ model: sonnet
 ---
 # ${name}
 
+## Prior handover
+
+<!-- What came before: existing agents/skills this extends, prior decisions. Link them. -->
+
+## Purpose in the chain
+
 You are the ${name} agent.
+
+## Next pick-up
+
+<!-- What the next session/consumer needs from this agent's run. -->
 EOF
             ;;
         rule)
@@ -318,10 +350,24 @@ paths:
 ---
 # ${name}
 
+## Prior handover
+
+<!-- What came before: existing rules/conventions this extends. Link them. -->
+
+## Purpose in the chain
+
 Rules that apply when editing matching files.
+
+## Next pick-up
+
+<!-- What future editors need: drift risks, review gates, related rules. -->
 EOF
             ;;
     esac
+
+    if [ -n "$scaffold_file" ]; then
+        sed "s/{{name}}/${name}/g" "$scaffold_file" > "$target"
+    fi
 
     echo "Created: $target"
 }
