@@ -322,15 +322,21 @@ export default function (pi: ExtensionAPI) {
       const why = result.stderr.trim() || result.stdout.trim();
       // Mirrors Claude Code's own PreToolUse permission prompt: a flagged command doesn't die
       // silently on a text reason — it puts up a real yes/no dialog right where the command was
-      // about to run, so an explicit in-session "yes, do it" actually clears the gate. Only
-      // possible in UI-capable modes (interactive/RPC); print/json modes have no dialog surface
-      // and keep the unconditional hard-block (ctx.hasUI is false there).
+      // about to run, so an explicit in-session choice clears the gate right where the command
+      // was about to run. Only possible in UI-capable modes (interactive/RPC); print/json modes
+      // have no dialog surface and keep the unconditional hard-block (ctx.hasUI is false there).
+      // THREE options (Alice, ask-gap design): "Yes (run once)" approves this call only;
+      // "Always yes" approves this call AND records a promotion signal — "I believe this is safe
+      // for the auto-approver to approve in future" — via the ask-gap audit in
+      // typing-aware-confirm.ts (it logs every select whose options include allow/always), later
+      // mined by R-utils/scripts/ask-gap-review.sh review (frequency + read-only-ness + judge
+      // verification decide promotion; the click itself NEVER changes any gate behavior).
       if (ctx.hasUI) {
-        const approved = await ctx.ui.confirm(
-          \`Blocked by $name\`,
-          \`\${command}\\n\\nMatched: \${why}\\n\\nRun anyway?\`,
+        const choice = await ctx.ui.select(
+          \`Blocked by $name\\n\\n\${command}\\n\\nMatched: \${why}\\n\\nRun anyway? — "Always yes" also records a signal that you consider this safe for the auto-approver to approve in future.\`,
+          ["Yes (run once)", "Always yes", "No"],
         );
-        if (approved) return;
+        if (choice === "Yes (run once)" || choice === "Always yes") return;
       }
       return { block: true, reason: \`Blocked by $name (matches: \${why}). Needs explicit approval.\` };
     }
