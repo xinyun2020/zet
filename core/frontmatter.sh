@@ -17,9 +17,30 @@ get_template_type() {
 # Get any frontmatter field value from a template
 # Args: file_path, key_name
 # Returns: the value (unquoted) or empty string
+# Double-quoted scalars are fully resolved (outer quotes stripped, \\ and \" unescaped)
+# so the value round-trips with yaml_quote — without unescaping, a template description
+# containing \" gets re-escaped to \\", which downstream YAML parsers reject.
 get_frontmatter_value() {
-    local file="$1" key="$2"
-    awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^'"$key"':/{sub(/^'"$key"': *"?/,"");sub(/"$/,"");print;exit}' "$file"
+    local file="$1" key="$2" raw
+    raw=$(awk '/^---$/{if(fm){exit}else{fm=1;next}} fm && /^'"$key"':/{sub(/^'"$key"': */,"");print;exit}' "$file")
+    case "$raw" in
+        '"'?*'"')
+            # double-quoted scalar — strip outer quotes, then unescape escapes.
+            # A trailing \" is escaped content, not the closing quote — leave the
+            # scalar as-is rather than mis-strip (same edge the awk version had).
+            case "$raw" in
+                *'\\"') return 0 ;;
+                *) ;;
+            esac
+            raw="${raw#\"}"
+            raw="${raw%\"}"
+            local esc=$'\x01'
+            raw="${raw//\\\\/$esc}"
+            raw="${raw//\\\"/\"}"
+            raw="${raw//$esc/\\}"
+            ;;
+    esac
+    printf '%s' "$raw"
 }
 
 # Quote a string for safe use as a YAML frontmatter scalar value.
