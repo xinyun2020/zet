@@ -167,6 +167,10 @@ cmd_validate() {
             if [ -z "$desc" ]; then
                 echo "  ERROR: $filename — skill missing description: field"
                 errors=$((errors + 1))
+            elif [ "${#desc}" -gt 1024 ]; then
+                # Pi's Agent Skills loader rejects descriptions over 1024 chars
+                echo "  ERROR: $filename — description is ${#desc} chars (max 1024): trim it"
+                errors=$((errors + 1))
             fi
         fi
 
