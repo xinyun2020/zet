@@ -134,13 +134,16 @@ pi_input_shape = "bash_command"
 EOF
 
 output=$(bash "$SCRIPT_DIR/../core/scanner.sh" --json 2>&1)
-python3 -c "
+ZET_TESTS_RUN=$((ZET_TESTS_RUN + 1))
+if python3 -c "
 import json, sys
 d = json.loads('''$output''')
 ok = 'stale-shim' in d['dead_hook_shims'] and 'live-shim' not in d['dead_hook_shims']
 sys.exit(0 if ok else 1)
-" && zet_pass "stale shim flagged, live shim (matching pi-targeting entry) not flagged" \
-   || zet_fail "dead_hook_shims check: expected only stale-shim flagged, got: $(printf '%s' "$output" | python3 -c "import json,sys; print(json.load(sys.stdin)['dead_hook_shims'])")"
+"; then zet_pass "stale shim flagged, live shim (matching pi-targeting entry) not flagged" \
+   || true
+else zet_fail "dead_hook_shims check: expected only stale-shim flagged, got: $(printf '%s' "$output" | python3 -c "import json,sys; print(json.load(sys.stdin)['dead_hook_shims'])")"
+fi
 zet_test_teardown
 
 zet_test_results
