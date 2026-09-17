@@ -334,7 +334,7 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) {
         const choice = await ctx.ui.select(
           \`Blocked by $name\\n\\n\${command}\\n\\nMatched: \${why}\\n\\nRun anyway? — "Always yes" also records a signal that you consider this safe for the auto-approver to approve in future.\`,
-          ["Yes (run once)", "Always yes", "No"],
+          ["Yes (run once)", "No", "Always yes"],
         );
         if (choice === "Yes (run once)" || choice === "Always yes") return;
       }
@@ -446,13 +446,51 @@ export default function (pi: ExtensionAPI) {
       tool_name: event.toolName === "write" ? "Write" : "Edit",
       tool_input: toolInput,
     });
-    const result = spawnSync("bash", [SCRIPT_PATH], { input: payload, encoding: "utf-8" });
-    if (result.status === null) {
-      return { block: true, reason: "$name could not run (spawnSync failed) — failing closed." };
+    const result = spawnSync("bash", [SCRIPT_PATH], { input: payload, encoding: "utf-8", timeout: 10000 });
+
+    // Installed Pi contract (runner.js emitToolResult): a tool_result handler returns a PARTIAL
+    // PATCH of {content, details, isError, usage}; omitted fields keep their current values.
+    // {block, reason} are silently IGNORED here — and this is POST-execution anyway: the edit
+    // was already applied, so a diagnostic can inform the model/UI but can never undo or block
+    // it. Blocking is the pre-tool gate's job (emit_bash_command_shim keeps {block, reason}).
+    function appendDiagnostic(evt: { content?: unknown; isError?: boolean }, text: string, isError?: boolean) {
+      // Append-only: preserve the original result content and error state, never overwrite.
+      const block = { type: "text" as const, text };
+      const patch: { content?: unknown; isError?: boolean } = {};
+      if (Array.isArray(evt.content)) patch.content = [...evt.content, block];
+      else if (typeof evt.content === "string" && evt.content.length > 0) patch.content = evt.content + "\\n" + text;
+      else patch.content = [block];
+      if (isError !== undefined) patch.isError = isError;
+      else if (evt.isError) patch.isError = true; // preserve pre-existing error state
+      return patch;
+    }
+
+    // Bounded diagnostic: a chatty source script must not flood the model context.
+    const raw = ((result.stdout as string) || "").trim();
+    const diag = raw.length > 2000 ? raw.slice(0, 2000) + "…(truncated)" : raw;
+
+    if (result.status === null || result.error || result.signal) {
+      // Operational failure (spawn failure, timeout kill, signal death). The edit is ALREADY
+      // applied — surface the failure honestly; never pretend it blocked or reverted anything.
+      const why = result.error ? (result.error as Error).message : result.signal ? \`killed by signal \${result.signal}\` : "spawnSync failed";
+      return appendDiagnostic(event, \`$name could not run (\${why}) — the edit is already applied; the check did NOT complete and did NOT block it.\`, true);
     }
     if (result.status === 2) {
-      return { block: true, reason: result.stderr.trim() || \`Blocked by $name.\` };
+      // Policy violation found in the already-written file: bounded isError-marked diagnostic.
+      // The file stays edited; a separate authoritative pre-tool gate owns real blocking.
+      return appendDiagnostic(event, diag || \`$name found violations — the edit is already applied; correct the reported pointer.\`, true);
     }
+    if (result.status !== 0) {
+      // Unexpected exit code: operational error, never a silent allow and never a verdict.
+      return appendDiagnostic(event, \`$name exited \${result.status} (unexpected) — the check did not complete; the edit is already applied.\`, true);
+    }
+    const nudge = ((result.stderr as string) || "").trim();
+    if (nudge) {
+      // Advisory exit-0 feedback (e.g. a due-date nudge on stderr): surface it WITHOUT isError.
+      const bounded = nudge.length > 2000 ? nudge.slice(0, 2000) + "…(truncated)" : nudge;
+      return appendDiagnostic(event, bounded, false);
+    }
+    return undefined; // clean run, nothing to say — leave the tool result untouched
   });
 }
 TSEOF

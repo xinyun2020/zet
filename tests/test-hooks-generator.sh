@@ -340,6 +340,60 @@ assert_not_contains_str "$missing_repair_output" "cache hit" "missing hook shim 
 assert_file_exists "$out" "missing hook shim is repaired"
 teardown
 
+# --- edit_write_post_content shim speaks the INSTALLED Pi tool_result contract (see plan
+# rust-agent-harness-migration v2, verified defect #1): the runner's emitToolResult consumes
+# {content, details, isError, usage} partial patches and silently IGNORES block/reason. The
+# old shim returned {block,reason} on exit 2 — post-write feedback that never reached anyone. ---
+setup
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[hooks.fixture-post]
+source = "scripts/fixture-edit.sh"
+targets = ["pi"]
+pi_input_shape = "edit_write_post_content"
+EOF
+bash "$GENERATOR" --quiet >/dev/null 2>&1
+out="$ZET_PI_EXTENSIONS/fixture-post.ts"
+assert_file_exists "$out" "edit_write_post_content shim file created"
+assert_not_contains "$out" "block: true" "post-result shim never returns block (ignored by emitToolResult)"
+assert_not_contains "$out" "reason:" "post-result shim never returns reason (ignored by emitToolResult)"
+assert_contains "$out" "isError" "post-result shim marks violations/failures via isError"
+assert_contains "$out" "evt.content" "post-result shim APPENDS to the original tool result content, preserving it"
+assert_contains "$out" "Array.isArray(" "post-result shim handles block-array and string result content shapes"
+assert_contains "$out" "timeout:" "post-result shim bounds the subprocess with a finite timeout"
+assert_contains "$out" "result.signal" "post-result shim reports signal death honestly"
+assert_contains "$out" "result.error" "post-result shim reports spawn errors honestly"
+assert_contains "$out" "already applied" "post-result shim never claims to undo or block the completed write"
+teardown
+
+# --- exit-0 advisory nudge: stderr feedback with a clean exit must surface WITHOUT isError
+# (due-date checker emits a nudge on stderr while succeeding); silent success stays silent ---
+setup
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[hooks.fixture-post]
+source = "scripts/fixture-edit.sh"
+targets = ["pi"]
+pi_input_shape = "edit_write_post_content"
+EOF
+bash "$GENERATOR" --quiet >/dev/null 2>&1
+out="$ZET_PI_EXTENSIONS/fixture-post.ts"
+assert_contains "$out" "return undefined" "silent exit-0 leaves the tool result untouched"
+assert_contains "$out" "appendDiagnostic(event, bounded, false)" "exit-0 advisory nudge is surfaced without marking an error"
+teardown
+
+# --- pre-tool blocking is a DIFFERENT seam and must keep its authoritative block verdict: the
+# post-result fix must not touch emit_bash_command_shim's {block, reason} contract ---
+setup
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[hooks.fixture-bash]
+source = "scripts/fixture-bash.sh"
+targets = ["pi"]
+pi_input_shape = "bash_command"
+EOF
+bash "$GENERATOR" --quiet >/dev/null 2>&1
+out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
+assert_contains "$out" "block: true" "pre-tool bash_command shim keeps authoritative block verdict"
+teardown
+
 echo ""
 echo "=== Results ==="
 echo "  Total: $((ZET_TESTS_PASSED + ZET_TESTS_FAILED)) | Passed: $ZET_TESTS_PASSED | Failed: $ZET_TESTS_FAILED"

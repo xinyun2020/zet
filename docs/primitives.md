@@ -32,6 +32,8 @@ Intercepts events and enforces constraints mechanically. Runs without human deci
 
 Hooks fire on lifecycle events (pre-push, post-edit, session-start). They validate, block, or transform — never ask.
 
+Authority differs by phase: PRE-execution hooks (bash-command gates, git pre-push) return an authoritative block verdict. POST-result hooks (edit/write scans) run after the action landed — their findings are advisory diagnostics appended to the tool result (marked `isError`), never a block or undo; blocking belongs to the pre-execution seam.
+
 Analogy: Express middleware.
 
 Why hooks over rules: a rule says "don't push secrets." A hook prevents it. Deterministic enforcement beats advisory instructions.
