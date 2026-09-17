@@ -700,6 +700,14 @@ render_agents_md() {
 
 add_rule_source() {
     local root="$1" source="$2" index
+    # Normalize the root: expand a leading ~/ to $HOME (a literal tilde dir never passes the
+    # [ -d "$ZET_ROOT/$root" ] guard in render_agents_md, so tilde paths in a template's paths:
+    # frontmatter silently generate NO mirror), and collapse a root equal to the project root to "."
+    # so the mirror lands at $ZET_ROOT/AGENTS.md instead of $ZET_ROOT/<abs-path>/AGENTS.md.
+    root="${root/#\~/$HOME}"
+    if [ "$root" = "$ZET_ROOT" ] || [ "$(cd "$root" 2>/dev/null && pwd -P)" = "$(cd "$ZET_ROOT" 2>/dev/null && pwd -P)" ]; then
+        root="."
+    fi
     for index in "${!RULE_ROOTS[@]}"; do
         if [ "${RULE_ROOTS[$index]}" = "$root" ]; then
             RULE_SOURCES[$index]="${RULE_SOURCES[$index]} $source"
