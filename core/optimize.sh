@@ -66,7 +66,7 @@ done
 
 # Token accounting model (the split the field standardized on):
 #   always-loaded = what sits in EVERY session's context window unconditionally —
-#                   the full CLAUDE.md + everything in rules/ + the frontmatter (name +
+#                   the full AGENTS.md + everything in rules/ + the frontmatter (name +
 #                   description) of every skill/agent (the agent always sees these to decide
 #                   what to invoke). This is the number that competes for the context budget.
 #   on-demand     = skill/agent BODIES — loaded only when that skill actually fires.
@@ -76,7 +76,12 @@ CHAR_PER_TOKEN_DEN=45
 CONTEXT_WINDOW=200000
 # Always-loaded config files. Resolve with sane defaults; skip silently if absent (e.g. test
 # harness has no ~/.claude) so the count degrades to frontmatter-only rather than erroring.
-CLAUDE_MD="$(resolve_path "${ZET_CLAUDE_MD:-$HOME/.claude/CLAUDE.md}")"
+# 2026-09-22: the canonical instruction file is AGENTS.md (CLAUDE.md→AGENTS.md migration —
+# see obsidian vault My System Architecture [[2026-09-22]]); fall back to CLAUDE.md for repos
+# that still use it (shared-team convention). ZET_CLAUDE_MD override still honored.
+_default_instruction_md="$HOME/.claude/AGENTS.md"
+[ -f "$_default_instruction_md" ] || _default_instruction_md="${ZET_CLAUDE_MD:-$HOME/.claude/CLAUDE.md}"
+CLAUDE_MD="$(resolve_path "${ZET_AGENTS_MD:-$_default_instruction_md}")"
 RULES_DIR="$(resolve_path "${ZET_RULES_DIR:-$HOME/.claude/rules}")"
 
 # --- Tool detection patterns ---
@@ -394,7 +399,7 @@ if len(parts) >= 3:
 fi
 
 # --- Token budget (always-loaded vs on-demand) ---
-# Always-loaded also includes the full CLAUDE.md + everything in rules/ (read every session),
+# Always-loaded also includes the full AGENTS.md + everything in rules/ (read every session),
 # on top of the per-skill frontmatter summed in the loop. Missing files contribute 0 (graceful).
 if [ -f "$CLAUDE_MD" ]; then
     bytes=$(wc -c < "$CLAUDE_MD" | tr -d ' ')
@@ -538,11 +543,11 @@ $QUIET || echo ""
 
 # Token budget — the number that actually competes for the context window
 $QUIET || echo "--- Token Budget (always-loaded vs on-demand) ---"
-$QUIET || echo "  Always-loaded: ~${ALWAYS_LOADED_TOKENS} tokens (${ALWAYS_LOADED_PCT_STR}% of ${CONTEXT_WINDOW}) — CLAUDE.md + rules/ + every skill's frontmatter"
+$QUIET || echo "  Always-loaded: ~${ALWAYS_LOADED_TOKENS} tokens (${ALWAYS_LOADED_PCT_STR}% of ${CONTEXT_WINDOW}) — AGENTS.md + rules/ + every skill's frontmatter"
 $QUIET || echo "  On-demand:     ~${ON_DEMAND_TOKENS} tokens — skill bodies, loaded only when a skill fires"
 if [ -n "$BUDGET" ]; then
     if $OVER_BUDGET; then
-        $QUIET || echo "  OVER BUDGET: always-loaded ${ALWAYS_LOADED_TOKENS} > budget ${BUDGET} — trim CLAUDE.md/rules or move detail on-demand"
+        $QUIET || echo "  OVER BUDGET: always-loaded ${ALWAYS_LOADED_TOKENS} > budget ${BUDGET} — trim AGENTS.md/rules or move detail on-demand"
     else
         $QUIET || echo "  Within budget: always-loaded ${ALWAYS_LOADED_TOKENS} <= budget ${BUDGET}"
     fi

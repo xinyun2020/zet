@@ -98,7 +98,7 @@ if [ -n "$INSTRUCTION_FILES" ]; then
 else
     inst_files=()
     # Check common instruction file locations
-    for candidate in "$ZET_ROOT/CLAUDE.md" "$HOME/.claude/CLAUDE.md"; do
+    for candidate in "$ZET_ROOT/AGENTS.md" "$ZET_ROOT/CLAUDE.md" "$HOME/.claude/AGENTS.md" "$HOME/.claude/CLAUDE.md"; do
         [ -f "$candidate" ] && inst_files+=("$candidate")
     done
 fi

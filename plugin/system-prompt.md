@@ -13,7 +13,7 @@ You call `zet` for data, then act on the results. Never duplicate what `zet` alr
 ## Multi-tool awareness
 
 zet manages config for multiple AI coding tools. Check the session context for which tools are present:
-- Claude Code (`~/.claude/`): settings.json, mcp.yaml, hooks/, skills/, agents/, rules/, CLAUDE.md
+- Claude Code (`~/.claude/`): settings.json, mcp.yaml, hooks/, skills/, agents/, rules/, AGENTS.md
 - Codex (`~/.codex/`): config.toml, memories/, skills/, AGENTS.md
 
 When fixing or auditing, check all managed tools — not just the one you're running in.

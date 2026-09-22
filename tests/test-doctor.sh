@@ -192,11 +192,11 @@ teardown
 echo ""
 echo "--- Stale instruction paths ---"
 setup
-cat > "$ZET_ROOT/CLAUDE.md" <<'EOF'
+cat > "$ZET_ROOT/AGENTS.md" <<'EOF'
 Read ~/nonexistent/path/file.md for details.
 Also check $HOME/another/missing.sh for info.
 EOF
-export ZET_INSTRUCTION_FILES="$ZET_ROOT/CLAUDE.md"
+export ZET_INSTRUCTION_FILES="$ZET_ROOT/AGENTS.md"
 output=$(run_doctor_json)
 assert_contains_str "$output" "stale_paths" "detects stale paths"
 assert_not_contains_str "$output" '"stale_paths": []' "stale paths not empty"
