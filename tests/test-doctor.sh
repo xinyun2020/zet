@@ -49,7 +49,7 @@ echo ""
 # Test 1: Clean project — no issues
 echo "--- Clean project ---"
 setup
-# Override HOME to prevent doctor from checking real ~/.claude/CLAUDE.md
+# Override HOME to prevent doctor from checking real ~/.claude/AGENTS.md
 export HOME="$TEST_HOME"
 cat > "$ZET_TEMPLATES/hello_prompt_template.md" <<'EOF'
 ---
