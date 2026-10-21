@@ -377,7 +377,9 @@ EOF
 bash "$GENERATOR" --quiet >/dev/null 2>&1
 out="$ZET_PI_EXTENSIONS/fixture-post.ts"
 assert_contains "$out" "return undefined" "silent exit-0 leaves the tool result untouched"
-assert_contains "$out" "appendDiagnostic(event, bounded, false)" "exit-0 advisory nudge is surfaced without marking an error"
+assert_contains "$out" "advisory — details folded" "exit-0 advisory nudge is FOLDED (hidden context + advisory log, one-line summary)"
+assert_contains "$out" 'sendMessage({ customType: "hook-advisory", content: full, display: false' "full advisory text reaches the model as hidden context, never the screen"
+assert_contains "$out" "hook-advisories.jsonl" "advisory log append feeds hook-fold.ts's folded line"
 teardown
 
 # --- pre-tool blocking is a DIFFERENT seam and must keep its authoritative block verdict: the
