@@ -456,26 +456,15 @@ export default function (pi: ExtensionAPI) {
     // {block, reason} are silently IGNORED here — and this is POST-execution anyway: the edit
     // was already applied, so a diagnostic can inform the model/UI but can never undo or block
     // it. Blocking is the pre-tool gate's job (emit_bash_command_shim keeps {block, reason}).
-    // Demo-safety fold (pi fold work Round 12): the FULL diagnostic text must NOT ride in the
-    // tool result — pi renders tool output expanded, so violations/nudges leaked vault paths
-    // and ticket block lists onto the screen. Delivery is now three-surface:
-    //   model  → hidden context message (display:false — same channel @hsingjui/pi-hooks uses
-    //            for hook additionalContext; content reaches the model same-turn, never rendered)
-    //   screen → ONE collapsed line from hook-fold.ts (drains the advisory log):
-    //              ▸ hook advisories (N) folded — click or ctrl+o to expand
-    //   result → a one-line summary only (no paths, no block lists), isError preserved
-    function appendDiagnostic(evt: { content?: unknown; isError?: boolean }, text: string, isError?: boolean) {
-      // Append-only: preserve the original result content and error state, never overwrite.
-      const block = { type: "text" as const, text };
-      const patch: { content?: unknown; isError?: boolean } = {};
-      if (Array.isArray(evt.content)) patch.content = [...evt.content, block];
-      else if (typeof evt.content === "string" && evt.content.length > 0) patch.content = evt.content + "\\n" + text;
-      else patch.content = [block];
-      if (isError !== undefined) patch.isError = isError;
-      else if (evt.isError) patch.isError = true; // preserve pre-existing error state
-      return patch;
-    }
-    function foldDiagnostic(summary: string, full: string, isError?: boolean) {
+    // Demo-safety fold (pi fold work Rounds 12-13): the tool result stays COMPLETELY untouched
+    // — pi renders tool output expanded, so even a one-line summary was visible noise Alice
+    // didn't ask for. ALL diagnostic delivery is invisible: (a) model → hidden context message
+    // (display:false — same channel @hsingjui/pi-hooks uses for hook additionalContext; full
+    // text reaches the model same-turn), (b) screen → ONE collapsed line from hook-fold.ts
+    // (drains the advisory log): ▸ hook advisories (N) folded — click or ctrl+o to expand.
+    // isError is intentionally NOT set — the edit itself succeeded; the hidden text carries
+    // the verdict with full context.
+    function foldDiagnostic(full: string) {
       try {
         pi.sendMessage({ customType: "hook-advisory", content: full, display: false, details: { source: "$name" } });
         const sessionId = ctx?.sessionManager?.getSessionFile?.() ?? "";
@@ -486,9 +475,9 @@ export default function (pi: ExtensionAPI) {
           );
         }
       } catch {
-        // hidden-channel + visual are best-effort — the one-line summary always informs
+        // hidden-channel + visual are best-effort; failures here never corrupt the tool result
       }
-      return appendDiagnostic(event, summary, isError);
+      return undefined; // tool result untouched — folded means folded
     }
 
     // Bounded diagnostic: a chatty source script must not flood the model context.
@@ -499,26 +488,23 @@ export default function (pi: ExtensionAPI) {
       // Operational failure (spawn failure, timeout kill, signal death). The edit is ALREADY
       // applied — surface the failure honestly; never pretend it blocked or reverted anything.
       const why = result.error ? (result.error as Error).message : result.signal ? \`killed by signal \${result.signal}\` : "spawnSync failed";
-      const msg = \`$name could not run (\${why}) — the edit is already applied; the check did NOT complete and did NOT block it.\`;
-      return foldDiagnostic(msg, msg, true);
+      return foldDiagnostic(\`$name could not run (\${why}) — the edit is already applied; the check did NOT complete and did NOT block it.\`);
     }
     if (result.status === 2) {
-      // Policy violation found in the already-written file: isError-marked one-line summary;
-      // full findings go to the hidden channel + advisory log (folded line on screen).
-      // The file stays edited; a separate authoritative pre-tool gate owns real blocking.
-      const detail = diag || \`$name found violations — the edit is already applied; correct the reported pointer.\`;
-      return foldDiagnostic(\`$name found violations — details folded (click the advisories line); the edit is already applied; correct the reported pointer.\`, detail, true);
+      // Policy violation found in the already-written file: full findings go to the hidden
+      // channel + advisory log (folded line on screen). The file stays edited; a separate
+      // authoritative pre-tool gate owns real blocking.
+      return foldDiagnostic(diag || \`$name found violations — the edit is already applied; correct the reported pointer.\`);
     }
     if (result.status !== 0) {
       // Unexpected exit code: operational error, never a silent allow and never a verdict.
-      const msg = \`$name exited \${result.status} (unexpected) — the check did not complete; the edit is already applied.\`;
-      return foldDiagnostic(msg, msg, true);
+      return foldDiagnostic(\`$name exited \${result.status} (unexpected) — the check did not complete; the edit is already applied.\`);
     }
     const nudge = ((result.stderr as string) || "").trim();
     if (nudge) {
-      // Advisory exit-0 feedback (e.g. a due-date nudge on stderr): full text folded, no isError.
+      // Advisory exit-0 feedback (e.g. a due-date nudge on stderr): full text folded.
       const bounded = nudge.length > 2000 ? nudge.slice(0, 2000) + "…(truncated)" : nudge;
-      return foldDiagnostic("$name advisory — details folded (click the advisories line)", bounded, false);
+      return foldDiagnostic(bounded);
     }
     return undefined; // clean run, nothing to say — leave the tool result untouched
   });
