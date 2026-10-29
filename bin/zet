@@ -6,7 +6,8 @@
 #   generate    Build skills/agents/rules from templates
 #   test        Run test suite
 #   scan        Detect dead code and drift
-#   validate    Check template structure and frontmatter
+#   validate    Check template structure and frontmatter (incl. script refs)
+#   scripts     Script-usage matrix across templates
 #   init        Scaffold a new harness project
 #   doctor      Full health check (validate + scan + test)
 #   new         Create a new template (skill, agent, or rule)
@@ -43,7 +44,8 @@ usage() {
     echo "  status      One-line health summary (counts + staleness)"
     echo "  test        Run test suite"
     echo "  scan        Detect dead code and drift"
-    echo "  validate    Check template frontmatter and structure"
+    echo "  validate    Check template frontmatter and structure (incl. script refs)"
+    echo "  scripts     Script-usage matrix across templates"
     echo "  init        Scaffold a new harness project"
     echo "  eval        Run skill quality evals (golden scenarios)"
     echo "  coverage    Report test and documentation coverage"
@@ -181,12 +183,41 @@ cmd_validate() {
         fi
     done
 
+    # Dangling template-script references — a template that mentions a script must
+    # point at one that exists (as written, ZET_ROOT-relative, template-relative,
+    # or in a configured [paths] scripts root). Dangling refs count as validation
+    # errors so `zet doctor` and `zet healthcheck` gate on them too.
+    source "$ZET_CORE/script-refs.sh"
+    for file in "$template_dir"/*_prompt_template.md; do
+        [ -f "$file" ] || continue
+        filename=$(basename "$file")
+        while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            if ! resolve_script_ref "$ref" "$template_dir" >/dev/null; then
+                echo "  ERROR: $filename — dangling script reference: '$ref' (no file at repo root, template dir, or configured script roots)"
+                errors=$((errors + 1))
+            fi
+        done < <(extract_script_refs "$file")
+    done
+
     if [ "$errors" -eq 0 ]; then
         echo "  All templates valid."
     else
         echo ""
         echo "  $errors error(s) found."
         exit 1
+    fi
+}
+
+cmd_scripts() {
+    source "$ZET_CORE/config.sh"
+    zet_config_init "$ZET_ROOT"
+    local custom_cmd
+    custom_cmd=$(zet_config_get "commands" "scripts" "")
+    if [ -n "$custom_cmd" ]; then
+        eval "$custom_cmd" "$@"
+    else
+        bash "$ZET_CORE/script-refs.sh" "$@"
     fi
 }
 
@@ -498,6 +529,7 @@ case "$COMMAND" in
     scan)         cmd_scan "$@" ;;
     coverage)     cmd_coverage "$@" ;;
     validate)     cmd_validate "$@" ;;
+    scripts)      cmd_scripts "$@" ;;
     init)         cmd_init "$@" ;;
     new)          cmd_new "$@" ;;
     eval)         cmd_eval "$@" ;;
