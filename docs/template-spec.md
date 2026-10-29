@@ -73,10 +73,19 @@ Set `ZET_GENERATE_FORCE=1` to bypass the run-level cache and force a full render
 For a template role `R`, Zet reads the Pi chain from the configured model-roles file in this order:
 
 ```text
-pi_R, pi_R_fallback_1, pi_R_fallback_2, ...
+pi_R, pi_R_fallback_1, ..., pi_R_fallback_9
 ```
 
-Each model must have a matching `pi_R[_fallback_N]_provider`. Zet emits explicit `provider/model` values in that configured order, so extension-level bare-model provider preferences cannot reorder them. `execute` maps to the existing `implement` Pi role, `audit` maps to `review`, and `orchestrate` maps to `discover`. The role's `{R}_effort` becomes the extension's `thinking:` field.
+Fallback slots are limited to `1`–`9` (matching the parser's fixed 0–9 slot walk).
+
+Each slot accepts either format:
+
+- **Chain format** — one key holds ordered whitespace-separated `model@provider` candidates, e.g. `pi_R=model-a@provider-a model-b@provider-b` (same shape for the fallback keys). Each token splits at its **first** `@`; any later `@` stays in the provider part.
+- **Split-key format (legacy)** — a bare model id on `pi_R[_fallback_N]` plus a matching `pi_R[_fallback_N]_provider` key.
+
+The formats can be mixed across slots. Candidates that end up without a model or a provider (e.g. an empty `@provider` id or a bare id with no matching `*_provider` key) are skipped with a warning. Zet emits the full explicit `provider/model` chain in the configured order, so extension-level bare-model provider preferences cannot reorder it; generated Pi agent frontmatter pins only the **first usable candidate** of that chain.
+
+Role aliases: `execute` maps to the Pi role `implement`, and `orchestrate` maps to `discover`; `audit` passes through unchanged.
 
 ### Pass-through Fields
 

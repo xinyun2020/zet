@@ -339,10 +339,14 @@ resolve_model_role() {
 }
 
 # Return an ordered Pi model chain for a template role. Pi's prompt extension accepts a comma-separated
-# model list, but its bare-ID provider preference is fixed upstream. Pairing each configured model with its
-# provider here keeps the user's provider/fallback order in model-roles.conf authoritative.
+# model list, but its bare-ID provider preference is fixed upstream. Two approved model-roles.conf
+# formats feed this parser: the current one-key chain (ordered whitespace-separated model@provider
+# candidates, same shape for numbered fallback keys) and the legacy split-key format (bare model on
+# pi_ROLE / pi_ROLE_fallback_N plus a separate *_provider key). Pairing each configured model with
+# its provider here keeps the user's provider/fallback order authoritative.
 resolve_pi_model_chain() {
-    local role="$1" pi_role="$1" i model provider entry chain=""
+    local role="$1" pi_role="$1" i raw model provider token key_provider entry chain=""
+    local -a tokens=()
     case "$role" in
         execute)     pi_role="implement" ;;
         audit)       pi_role="audit" ;;
@@ -350,19 +354,31 @@ resolve_pi_model_chain() {
     esac
     for i in 0 1 2 3 4 5 6 7 8 9; do
         if [ "$i" -eq 0 ]; then
-            model=$(resolve_model_role "pi_${pi_role}" || true)
-            provider=$(resolve_model_role "pi_${pi_role}_provider" || true)
+            raw=$(resolve_model_role "pi_${pi_role}" || true)
+            key_provider=$(resolve_model_role "pi_${pi_role}_provider" || true)
         else
-            model=$(resolve_model_role "pi_${pi_role}_fallback_${i}" || true)
-            provider=$(resolve_model_role "pi_${pi_role}_fallback_${i}_provider" || true)
+            raw=$(resolve_model_role "pi_${pi_role}_fallback_${i}" || true)
+            key_provider=$(resolve_model_role "pi_${pi_role}_fallback_${i}_provider" || true)
         fi
-        [ -z "$model" ] && continue
-        if [ -z "$provider" ]; then
-            echo "  WARNING: missing provider for Pi role '$pi_role' candidate '$model'" >&2
-            continue
-        fi
-        entry="$provider/$model"
-        chain="${chain:+$chain, }$entry"
+        [ -z "$raw" ] && continue
+        # Split on whitespace via read (never glob expansion) — a value like '*' or a model
+        # id with glob metacharacters must reach the chain literally.
+        IFS=$' \t' read -r -a tokens <<< "$raw"
+        # Each token is either model@provider (current format) or a bare
+        # model id that pairs with the slot's split *_provider key (legacy format).
+        for token in "${tokens[@]}"; do
+            provider="$key_provider"
+            case "$token" in
+                *@*) model="${token%%@*}"; provider="${token#*@}" ;;
+                *)   model="$token" ;;
+            esac
+            if [ -z "$model" ] || [ -z "$provider" ]; then
+                echo "  WARNING: missing provider for Pi role '$pi_role' candidate '$model'" >&2
+                continue
+            fi
+            entry="$provider/$model"
+            chain="${chain:+$chain, }$entry"
+        done
     done
     [ -n "$chain" ] && printf '%s\n' "$chain"
 }
