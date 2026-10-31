@@ -304,8 +304,20 @@ export default function (pi: ExtensionAPI) {
     const args = dangerScan ? [SCRIPT_PATH, "--why"] : [SCRIPT_PATH];
     const result = spawnSync("bash", args, {
       input,
-      encoding: "utf-8",$env_block
+      encoding: "utf-8",
+      // Bounded wait: a wedged gate script (env lock, git lock, any external wedge) must hang
+      // this tool call for seconds, never the whole session for hours. On timeout spawnSync
+      // kills the child with SIGTERM (status null, signal SIGTERM) — the branch below fails
+      // closed. 15s: >10x the worst observed clean run (~0.7s), < the post-shim's 10s budget
+      // so the pre-tool gate stays the authoritative slow-path.
+      timeout: 15000,$env_block
     });
+
+    // spawnSync's timeout kill arrives as signal=SIGTERM with a null status — check it BEFORE
+    // the generic null-status branch so the reason names the timeout, not a vague spawn failure.
+    if (result.signal === "SIGTERM") {
+      return { block: true, reason: "$name gate timed out after 15s — failing closed." };
+    }
 
     // result.status is null if spawnSync itself failed (missing bash binary, script deleted,
     // permission/resource error) — that is NOT the same as the script running and confirming
@@ -392,8 +404,18 @@ export default function (pi: ExtensionAPI) {
       tool_name: event.toolName === "write" ? "Write" : "Edit",
       tool_input: toolInputJson,
     });
-    const result = spawnSync("bash", [SCRIPT_PATH], { input: payload, encoding: "utf-8" });
+    const result = spawnSync("bash", [SCRIPT_PATH], {
+      input: payload,
+      encoding: "utf-8",
+      // Bounded wait, same rationale and timeout shape as emit_bash_command_shim above.
+      timeout: 15000,
+    });
 
+    // See emit_bash_command_shim: a SIGTERM-with-null-status is the timeout kill shape — name it
+    // honestly before the generic null-status branch.
+    if (result.signal === "SIGTERM") {
+      return { block: true, reason: "$name gate timed out after 15s — failing closed." };
+    }
     // See emit_bash_command_shim's identical comment: a null status means spawnSync itself
     // failed, not that the script ran and confirmed safety — fail closed, never silently allow.
     if (result.status === null) {
@@ -487,7 +509,7 @@ export default function (pi: ExtensionAPI) {
     if (result.status === null || result.error || result.signal) {
       // Operational failure (spawn failure, timeout kill, signal death). The edit is ALREADY
       // applied — surface the failure honestly; never pretend it blocked or reverted anything.
-      const why = result.error ? (result.error as Error).message : result.signal ? \`killed by signal \${result.signal}\` : "spawnSync failed";
+      const why = result.error ? (result.error as Error).message : result.signal === "SIGTERM" ? \`timed out after 10s (killed by SIGTERM)\` : result.signal ? \`killed by signal \${result.signal}\` : "spawnSync failed";
       return foldDiagnostic(\`$name could not run (\${why}) — the edit is already applied; the check did NOT complete and did NOT block it.\`);
     }
     if (result.status === 2) {

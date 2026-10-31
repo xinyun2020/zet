@@ -397,6 +397,41 @@ out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
 assert_contains "$out" "block: true" "pre-tool bash_command shim keeps authoritative block verdict"
 teardown
 
+# --- ALL generated Pi gate shims bound their spawnSync with a finite timeout (2026-11-01,
+# hooks-spawnsync-timeout): an unbounded spawnSync let a wedged gate script freeze a Pi session
+# for 24h. Pre-tool shims must ALSO fail closed on the timeout kill (SIGTERM + null status) with
+# a reason that names the hook and says it timed out. ---
+setup
+cat > "$ZET_ROOT/zet.toml" <<EOF
+[hooks.fixture-bash]
+source = "scripts/fixture-bash.sh"
+targets = ["pi"]
+pi_input_shape = "bash_command"
+
+[hooks.fixture-edit]
+source = "scripts/fixture-edit.sh"
+targets = ["pi"]
+pi_input_shape = "edit_write_content"
+
+[hooks.fixture-post]
+source = "scripts/fixture-edit.sh"
+targets = ["pi"]
+pi_input_shape = "edit_write_post_content"
+EOF
+bash "$GENERATOR" --quiet >/dev/null 2>&1
+out="$ZET_PI_EXTENSIONS/fixture-bash.ts"
+assert_contains "$out" "timeout: 15000" "bash_command shim bounds spawnSync at 15s"
+assert_contains "$out" 'result.signal === "SIGTERM"' "bash_command shim detects the timeout kill signal"
+assert_contains "$out" 'gate timed out after 15s — failing closed' "bash_command timeout reason names the hook and fail-closed behavior"
+out="$ZET_PI_EXTENSIONS/fixture-edit.ts"
+assert_contains "$out" "timeout: 15000" "edit_write_content shim bounds spawnSync at 15s"
+assert_contains "$out" 'result.signal === "SIGTERM"' "edit_write_content shim detects the timeout kill signal"
+assert_contains "$out" 'gate timed out after 15s — failing closed' "edit_write_content timeout reason names the hook and fail-closed behavior"
+out="$ZET_PI_EXTENSIONS/fixture-post.ts"
+assert_contains "$out" "timeout: 10000" "post shim keeps its 10s timeout"
+assert_contains "$out" "timed out after 10s (killed by SIGTERM)" "post shim timeout diagnostic names the hook and the timeout"
+teardown
+
 echo ""
 echo "=== Results ==="
 echo "  Total: $((ZET_TESTS_PASSED + ZET_TESTS_FAILED)) | Passed: $ZET_TESTS_PASSED | Failed: $ZET_TESTS_FAILED"
