@@ -255,23 +255,31 @@ emit_bash_command_shim() {
     # as a proper JS string literal rather than interpolating raw text.
     local source_abs_js
     source_abs_js="$(_ts_string_escape "$source_abs")"
-    # If [paths].session-board is configured, pass ctx.cwd + its resolved path through as env vars
-    # the target script can OPT INTO checking (e.g. ccs-danger-scan.sh clears a plain "git push"
-    # match if a live, sha-bound approval was explicitly recorded via session-board.sh
-    # approve-push) — a real authorization channel, never a weaker text match. Left out entirely
-    # when unconfigured, so a project with no such script gets exactly the prior spawnSync call,
-    # unchanged.
-    local env_block=""
+    # ALWAYS pass the session cwd through as _CCS_SCAN_CWD (2026-11-04): ccs-danger-scan.sh gates
+    # its friction-reduction exemptions (sed -i on git-tracked//tmp targets, safe-scratch rm, the
+    # vault push channel's cd-following) on the CALLER-supplied cwd and FAILS CLOSED when absent —
+    # so a shim that omits it silently disables every cwd-gated exemption in this harness while the
+    # Claude hook (ccs-auto-approve.sh) keeps them armed. That divergence made pi re-ask every
+    # sed -i the Claude side had long stopped asking about (26 identical "Always yes" clicks in the
+    # ask-gap log before diagnosis). Passing cwd only ENABLES the scanner's own verified exemptions;
+    # the fail-closed contract for everything unverifiable is unchanged.
+    # If [paths].session-board is ALSO configured, additionally pass its resolved path through so
+    # the target script can OPT INTO the push-approval escape hatch (a live, sha-bound approval
+    # recorded via session-board.sh approve-push clears a plain "git push" match — a real
+    # authorization channel, never a weaker text match).
+    local env_block="
+      env: {
+        ...process.env,
+        _CCS_SCAN_CWD: ctx.cwd,"
     if [ -n "$SESSION_BOARD_PATH" ]; then
         local board_js
         board_js="$(_ts_string_escape "$SESSION_BOARD_PATH")"
-        env_block="
-      env: {
-        ...process.env,
+        env_block+="
         _CCS_PUSH_APPROVAL_CWD: ctx.cwd,
-        _CCS_SESSION_BOARD: $board_js,
-      },"
+        _CCS_SESSION_BOARD: $board_js,"
     fi
+    env_block+="
+      },"
     write_if_changed "$out_file" <<TSEOF
 // Ports Claude Code's $name gate into Pi. Single source of truth stays
 // $source_rel — this extension only translates Pi's tool_call (bash) shape
@@ -341,7 +349,7 @@ export default function (pi: ExtensionAPI) {
       // "Always yes" approves this call AND records a promotion signal — "I believe this is safe
       // for the auto-approver to approve in future" — via the ask-gap audit in
       // typing-aware-confirm.ts (it logs every select whose options include allow/always), later
-      // mined by R-utils/scripts/ask-gap-review.sh review (frequency + read-only-ness + judge
+      // mined by R-utils/scripts/ccs-approve-audit.sh review (frequency + read-only-ness + judge
       // verification decide promotion; the click itself NEVER changes any gate behavior).
       if (ctx.hasUI) {
         const choice = await ctx.ui.select(
