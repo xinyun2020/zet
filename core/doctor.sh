@@ -35,6 +35,7 @@
 #   8. Codex health (if ~/.codex/ exists)
 #   9. Token bomb detection (unbounded Agent fan-out in templates)
 #  10. Backend health probing (runtime checks of external dependencies)
+#  11. Mirror drift (live mirrors vs a fresh compare-only compile — `zet generate --check`)
 #
 # Configuration via environment or zet.toml:
 #   ZET_ROOT, ZET_TEMPLATES, ZET_SKILLS, ZET_AGENTS, ZET_RULES
@@ -324,8 +325,17 @@ for probe_entry in "${probes[@]}"; do
     probe_command "$probe_name" "$probe_cmd"
 done
 
+# --- 11. Mirror drift — live mirrors vs a fresh compare-only compile ---
+# Runs the real generator in --check mode (writes nothing) so a hand-edited mirror is caught at
+# doctor time instead of being silently healed (or silently ignored) at the next generate.
+declare -a MIRROR_DRIFT=()
+_drift_out=$(bash "$SCRIPT_DIR/generator.sh" --check --quiet 2>&1) || true
+while IFS= read -r _drift_line; do
+    [ -n "$_drift_line" ] && MIRROR_DRIFT+=("$_drift_line")
+done < <(echo "$_drift_out" | sed -n '/^CHECK FAILED/,$p' | grep '^  - ' | sed 's/^  - //')
+
 # --- Output ---
-TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} + ${#TOKEN_BOMBS[@]} + ${#PROBE_ISSUES[@]} ))
+TOTAL=$(( ${#BROKEN_SYMLINKS[@]} + ${#STALE_PATHS[@]} + ${#BROKEN_REFS[@]} + ${#MISSING_RULE_PATHS[@]} + ${#MISSING_DESCRIPTIONS[@]} + ${#STALE_ROLES[@]} + ${#SECRET_HITS[@]} + ${#CODEX_ISSUES[@]} + ${#TOKEN_BOMBS[@]} + ${#PROBE_ISSUES[@]} + ${#MIRROR_DRIFT[@]} ))
 
 if $JSON_MODE; then
     to_json() {
@@ -344,6 +354,7 @@ if $JSON_MODE; then
         "$(to_json "${CODEX_ISSUES[@]}")" \
         "$(to_json "${TOKEN_BOMBS[@]}")" \
         "$(to_json "${PROBE_ISSUES[@]}")" \
+        "$(to_json "${MIRROR_DRIFT[@]}")" \
         <<'PYEOF'
 import json, sys
 print(json.dumps({
@@ -358,6 +369,7 @@ print(json.dumps({
     "codex_issues": json.loads(sys.argv[8]),
     "token_bombs": json.loads(sys.argv[9]),
     "probe_issues": json.loads(sys.argv[10]),
+    "mirror_drift": json.loads(sys.argv[11]),
 }, indent=2))
 PYEOF
     exit 0
@@ -423,6 +435,13 @@ fi
 if [ ${#PROBE_ISSUES[@]} -gt 0 ]; then
     $QUIET || echo "--- Backend Health Probes (${#PROBE_ISSUES[@]}) ---"
     for item in "${PROBE_ISSUES[@]}"; do $QUIET || echo "  - $item"; done
+    $QUIET || echo ""
+fi
+
+if [ ${#MIRROR_DRIFT[@]} -gt 0 ]; then
+    $QUIET || echo "--- Mirror Drift (would change on generate) (${#MIRROR_DRIFT[@]}) ---"
+    for item in "${MIRROR_DRIFT[@]}"; do $QUIET || echo "  - $item"; done
+    $QUIET || echo "  fix: run 'zet generate'"
     $QUIET || echo ""
 fi
 

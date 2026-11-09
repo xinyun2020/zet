@@ -3,7 +3,8 @@
 # Usage: zet <command> [options]
 #
 # Commands:
-#   generate    Build skills/agents/rules from templates
+#   generate    Build skills/agents/rules from templates (--check: compare-only drift gate —
+#               reports mirrors that would change, writes nothing, exit 1 on drift)
 #   test        Run test suite
 #   scan        Detect dead code and drift
 #   validate    Check template structure and frontmatter (incl. script refs)
@@ -71,6 +72,9 @@ cmd_generate() {
         eval "$custom_cmd" "$@"
     else
         bash "$ZET_CORE/generator.sh" "$@"
+        # --check is compare-only for the markdown mirrors; hook shims are not compared, so the
+        # check invocation stops here (also keeps hooks-generator.sh's strict arg parser happy).
+        for arg in "$@"; do [ "$arg" = "--check" ] && return 0; done
         # Separate script, separate invocation (not merged into generator.sh): hooks are a
         # structurally different unit (TOML table source, .ts output, not a markdown template),
         # and generator.sh already carries the lock/wipe/skills-local/skills-codex logic at

@@ -24,6 +24,7 @@ setup() {
     # from the calling shell.
     unset ZET_SKILLS_CODEX
     unset ZET_PI_PROMPTS
+    unset ZET_AGENTS_PI
     # PI_SKILLS must be isolated like skills-local: the default is the REAL ~/.pi/agent/skills, and an
     # un-isolated test run would write model-visible stubs into the user's live Pi skill set.
     unset ZET_PI_SKILLS
@@ -54,6 +55,12 @@ pi_think_fallback_1=bedrock-think
 pi_think_fallback_1_provider=amazon-bedrock
 pi_think_fallback_2=fireworks-think
 pi_think_fallback_2_provider=fireworks-ai
+# approved model-roles.conf format: one key holds ordered whitespace-separated
+# model@provider candidates (plus numbered fallbacks in the same format)
+pi_implement=zai.glm-5p3-flash@fireworks gpt-6-luna@github-copilot
+pi_implement_fallback_1=third-model@openai
+pi_audit=audit-model@auditprov
+pi_discover=disc-model@discprov
 think_effort=high
 EOF
 }
@@ -215,6 +222,92 @@ role: think
 EOF
 run_gen >/dev/null
 assert_not_contains "$ZET_PI_PROMPTS/pi-duplicate.md" "^model:" "Pi prompt carries no model metadata (inherits session)"
+teardown
+
+# Test 4d: Pi model@provider chain parsing
+# model-roles.conf stores ordered whitespace-separated model@provider candidates on a single
+# pi_* key. resolve_pi_model_chain must split them into ordered provider/model pairs, honor
+# the execute->implement alias, and keep the legacy split-key/numbered-fallback format working.
+echo ""
+echo "--- Pi model@provider chain parsing ---"
+
+# Extract a single top-level function from generator.sh so the parser can be tested directly
+# without executing the generator script (which runs a full generation on source).
+extract_generator_fn() {
+    awk '/^'"$1"'\(\) \{/,/^\}/' "$GENERATOR"
+}
+
+# Resolve a Pi chain against the isolated fixture config (no zet.toml [model-roles] section,
+# so resolve_model_role falls through to MODEL_ROLES_FILE exactly like the standalone conf).
+# Shared environment for the pi_chain_* probes below; each runs the parser in a subshell.
+pi_chain_env() {
+    ZET_ROOT="$ZET_ROOT"
+    MODEL_ROLES_FILE="$ZET_MODEL_ROLES"
+    source "$SCRIPT_DIR/../core/config.sh"
+    eval "$(extract_generator_fn resolve_model_role)"
+    eval "$(extract_generator_fn resolve_pi_model_chain)"
+}
+
+pi_chain_for() {
+    ( pi_chain_env; resolve_pi_model_chain "$1" 2>/dev/null )
+}
+
+# stderr only — the parser's skip warnings
+pi_chain_err_for() {
+    ( pi_chain_env; resolve_pi_model_chain "$1" 2>&1 >/dev/null )
+}
+
+# names of parser variables that exist (even empty) in the calling scope after a resolve
+pi_chain_leaks_for() {
+    ( pi_chain_env; resolve_pi_model_chain "$1" >/dev/null 2>&1
+      printf '%s' "${key_provider+key_provider }${entry+entry }${token+token }" )
+}
+
+setup
+export ZET_AGENTS_PI="$TEST_HOME/output/agents-pi"
+mkdir -p "$ZET_AGENTS_PI"
+cat > "$ZET_TEMPLATES/pi-runner_prompt_template.md" <<'EOF'
+---
+type: agent
+description: Pi chain agent
+role: execute
+---
+# Pi runner body
+EOF
+run_gen >/dev/null
+assert_contains "$ZET_AGENTS_PI/pi-runner.md" "model: fireworks/zai.glm-5p3-flash" "Pi agent frontmatter pins first chain candidate (execute->implement alias)"
+teardown
+
+setup
+assert_equals "$(pi_chain_for execute)" "fireworks/zai.glm-5p3-flash, github-copilot/gpt-6-luna, openai/third-model" "model@provider chain keeps candidate order incl. numbered fallback"
+assert_equals "$(pi_chain_for think)" "github-copilot/primary-think, amazon-bedrock/bedrock-think, fireworks-ai/fireworks-think" "legacy split-key config and numbered fallbacks still resolve"
+assert_equals "$(pi_chain_for audit)" "auditprov/audit-model" "audit role passes through unchanged (identity alias)"
+assert_equals "$(pi_chain_for orchestrate)" "discprov/disc-model" "orchestrate maps to discover"
+assert_equals "$(pi_chain_for unconfigured)" "" "unconfigured role yields empty chain"
+# Glob-safety: tokenizing a chain value must never pathname-expand '*' patterns
+mkdir -p "$TEST_HOME/globdir"
+touch "$TEST_HOME/globdir/matchme.txt"
+cat >> "$ZET_MODEL_ROLES" <<'EOF'
+pi_globsafe=*
+pi_globsafe_provider=prov
+pi_broken=@orphan bad-model@ lone-ok
+pi_broken_provider=loneprov
+EOF
+assert_equals "$(cd "$TEST_HOME/globdir" && pi_chain_for globsafe)" "prov/*" "chain tokenizing is glob-safe (no pathname expansion)"
+# Malformed candidates must be skipped (with a warning) without breaking the chain;
+# first-usable selection then lands on the first usable candidate.
+assert_equals "$(pi_chain_for broken)" "loneprov/lone-ok" "malformed candidates skipped, chain continues to first usable"
+assert_contains_str "$(pi_chain_err_for broken)" "WARNING: missing provider for Pi role 'broken'" "malformed candidate warns on stderr"
+assert_equals "$(pi_chain_leaks_for execute)" "" "parser leaves no globals behind (key_provider/entry/token scoped)"
+teardown
+
+# Test 4e: fixture variable isolation
+# setup() must reset exported output-path vars (like ZET_AGENTS_PI) so one test's fixture
+# config cannot leak into later tests.
+echo ""
+echo "--- Fixture variable isolation ---"
+setup
+assert_equals "${ZET_AGENTS_PI:-}" "" "ZET_AGENTS_PI unset by setup (no leak between fixtures)"
 teardown
 
 # Test 5: Stale cleanup
@@ -706,6 +799,41 @@ rm "$ZET_SKILLS_CODEX/manifestcheck/SKILL.md"
 missing_repair_output=$(bash "$GENERATOR" 2>&1)
 assert_output_not_contains "$missing_repair_output" "cache hit" "missing generated file invalidates cache"
 assert_file_exists "$ZET_SKILLS_CODEX/manifestcheck/SKILL.md" "missing generated file is repaired"
+teardown
+
+echo ""
+echo "--- --check: compare-only drift gate (reports, never writes, exit 1 on drift) ---"
+setup
+export ZET_GENERATE_JOBS=1
+export ZET_SKILLS_CODEX="$TEST_HOME/output/skills-codex"
+export ZET_PI_PROMPTS="$TEST_HOME/output/pi-prompts"
+mkdir -p "$ZET_SKILLS_CODEX"
+cat > "$ZET_TEMPLATES/checkdrift_prompt_template.md" <<'EOF'
+---
+type: skill
+description: check mode drift gate
+role: think
+---
+# Check drift gate
+EOF
+bash "$GENERATOR" >/dev/null 2>&1
+check_clean=$(bash "$GENERATOR" --check --quiet 2>&1); check_clean_rc=$?
+assert_equals "$check_clean_rc" "0" "check mode exits 0 when mirrors match templates"
+assert_output_contains "$check_clean" "all mirrors match" "clean check prints the all-match verdict"
+
+# Drift in a PIPE-written mirror (pi prompt, via `{ ... } | write_if_changed`) must be caught:
+# the pipe subshell is exactly why drift is recorded in a file, not an array
+echo "# Manual drift" >> "$ZET_PI_PROMPTS/checkdrift.md"
+check_drift_output=$(bash "$GENERATOR" --check 2>&1); check_drift_rc=$?
+assert_equals "$check_drift_rc" "1" "check mode exits 1 on drift"
+assert_output_contains "$check_drift_output" "CHECK FAILED" "drifted pi-prompt mirror is reported"
+assert_output_contains "$check_drift_output" "checkdrift.md" "drift report names the drifted file"
+assert_contains "$ZET_PI_PROMPTS/checkdrift.md" "Manual drift" "check mode did not repair the drift (compare-only)"
+
+# Clean pass again after a real generate heals the drift
+bash "$GENERATOR" >/dev/null 2>&1
+check_healed_rc=$(bash "$GENERATOR" --check --quiet >/dev/null 2>&1; echo $?)
+assert_equals "$check_healed_rc" "0" "check mode exits 0 again after generate heals the drift"
 teardown
 
 zet_test_results

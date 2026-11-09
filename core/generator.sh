@@ -148,7 +148,13 @@ esac
 [ "$GENERATE_JOBS" -lt 1 ] && GENERATE_JOBS=1
 
 DRY_RUN=false
+CHECK_MODE=false
 QUIET=false
+# Drift is recorded in a file, not an array: write_if_changed is invoked as the last stage of
+# `{ ... } | write_if_changed` pipelines, and a pipeline stage is a subshell in bash — an array
+# append there would never reach the parent. A file append survives every subshell.
+CHECK_DRIFT_FILE="$(mktemp "${TMPDIR:-/tmp}/zet-check-drift.$$.XXXXXX")"
+trap 'rm -f "$CHECK_DRIFT_FILE"' EXIT
 RULE_ROOTS=()
 RULE_SOURCES=()
 RENDER_PIDS=()
@@ -163,6 +169,7 @@ LIVE_HANDWRITTEN_MIRROR_NAMES=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry)   DRY_RUN=true; shift ;;
+        --check) CHECK_MODE=true; shift ;;
         --quiet) QUIET=true; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -182,10 +189,12 @@ $QUIET || echo "Output: skills=$SKILLS_DIR | agents=$AGENTS_DIR | rules=$RULES_D
 [ -n "$SKILLS_CODEX_DIR" ] && ! $QUIET && echo "Backend: $SKILLS_CODEX_DIR (codex)"
 ! $QUIET && echo "Parallelism: $GENERATE_JOBS skill render job(s)"
 ! $QUIET && $DRY_RUN && echo "DRY RUN — no files will be written"
+! $QUIET && $CHECK_MODE && echo "CHECK — compare-only: reports mirrors that would change, writes nothing"
 
 # --- Helpers ---
 ensure_dir() {
     local dir="$1"
+    $CHECK_MODE && return 0
     if [ -L "$dir" ] && [ -d "$dir" ]; then
         # Symlink to valid directory — use it as-is (e.g. ~/.claude/skills -> obsidian source)
         return 0
@@ -198,6 +207,27 @@ ensure_dir() {
 
 write_if_changed() {
     local target="$1" dir base tmp
+    if $CHECK_MODE; then
+        # Check mode: diff what WOULD be written against the live target, record drift, never write.
+        # The tmp file collects stdin, is compared, then removed — the live target is untouched.
+        # A missing output DIR means this project has never generated — not drift, skip it
+        # (doctor runs --check on fresh projects too; demanding generation there is a false alarm).
+        dir=$(dirname "$target")
+        base=$(basename "$target")
+        if [ ! -d "$dir" ]; then
+            cat >/dev/null
+            return 0
+        fi
+        tmp="$dir/.$base.tmp.$$.$RANDOM"
+        cat > "$tmp"
+        if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+            rm -f "$tmp"
+        else
+            echo "$target" >> "$CHECK_DRIFT_FILE"
+            rm -f "$tmp"
+        fi
+        return 0
+    fi
     dir=$(dirname "$target")
     base=$(basename "$target")
     mkdir -p "$dir"
@@ -212,6 +242,13 @@ write_if_changed() {
 
 copy_file_if_changed() {
     local source="$1" target="$2" dir base tmp
+    if $CHECK_MODE; then
+        if [ -f "$target" ] && cmp -s "$source" "$target"; then
+            return 0
+        fi
+        echo "$target" >> "$CHECK_DRIFT_FILE"
+        return 0
+    fi
     [ -f "$target" ] && cmp -s "$source" "$target" && return 0
     dir=$(dirname "$target")
     base=$(basename "$target")
@@ -339,10 +376,14 @@ resolve_model_role() {
 }
 
 # Return an ordered Pi model chain for a template role. Pi's prompt extension accepts a comma-separated
-# model list, but its bare-ID provider preference is fixed upstream. Pairing each configured model with its
-# provider here keeps the user's provider/fallback order in model-roles.conf authoritative.
+# model list, but its bare-ID provider preference is fixed upstream. Two approved model-roles.conf
+# formats feed this parser: the current one-key chain (ordered whitespace-separated model@provider
+# candidates, same shape for numbered fallback keys) and the legacy split-key format (bare model on
+# pi_ROLE / pi_ROLE_fallback_N plus a separate *_provider key). Pairing each configured model with
+# its provider here keeps the user's provider/fallback order authoritative.
 resolve_pi_model_chain() {
-    local role="$1" pi_role="$1" i model provider entry chain=""
+    local role="$1" pi_role="$1" i raw model provider token key_provider entry chain=""
+    local -a tokens=()
     case "$role" in
         execute)     pi_role="implement" ;;
         audit)       pi_role="audit" ;;
@@ -350,19 +391,31 @@ resolve_pi_model_chain() {
     esac
     for i in 0 1 2 3 4 5 6 7 8 9; do
         if [ "$i" -eq 0 ]; then
-            model=$(resolve_model_role "pi_${pi_role}" || true)
-            provider=$(resolve_model_role "pi_${pi_role}_provider" || true)
+            raw=$(resolve_model_role "pi_${pi_role}" || true)
+            key_provider=$(resolve_model_role "pi_${pi_role}_provider" || true)
         else
-            model=$(resolve_model_role "pi_${pi_role}_fallback_${i}" || true)
-            provider=$(resolve_model_role "pi_${pi_role}_fallback_${i}_provider" || true)
+            raw=$(resolve_model_role "pi_${pi_role}_fallback_${i}" || true)
+            key_provider=$(resolve_model_role "pi_${pi_role}_fallback_${i}_provider" || true)
         fi
-        [ -z "$model" ] && continue
-        if [ -z "$provider" ]; then
-            echo "  WARNING: missing provider for Pi role '$pi_role' candidate '$model'" >&2
-            continue
-        fi
-        entry="$provider/$model"
-        chain="${chain:+$chain, }$entry"
+        [ -z "$raw" ] && continue
+        # Split on whitespace via read (never glob expansion) — a value like '*' or a model
+        # id with glob metacharacters must reach the chain literally.
+        IFS=$' \t' read -r -a tokens <<< "$raw"
+        # Each token is either model@provider (current format) or a bare
+        # model id that pairs with the slot's split *_provider key (legacy format).
+        for token in "${tokens[@]}"; do
+            provider="$key_provider"
+            case "$token" in
+                *@*) model="${token%%@*}"; provider="${token#*@}" ;;
+                *)   model="$token" ;;
+            esac
+            if [ -z "$model" ] || [ -z "$provider" ]; then
+                echo "  WARNING: missing provider for Pi role '$pi_role' candidate '$model'" >&2
+                continue
+            fi
+            entry="$provider/$model"
+            chain="${chain:+$chain, }$entry"
+        done
     done
     [ -n "$chain" ] && printf '%s\n' "$chain"
 }
@@ -542,7 +595,7 @@ render_skill_outputs() {
 
     # Same SKILL.md format, same model metadata; the open standard target is a portability mirror.
     if [ -n "$AGENTS_STD_DIR" ]; then
-        mkdir -p "$AGENTS_STD_DIR/$name"
+        $CHECK_MODE || mkdir -p "$AGENTS_STD_DIR/$name"
         copy_file_if_changed "$skill_dir/SKILL.md" "$AGENTS_STD_DIR/$name/SKILL.md"
     fi
 
@@ -749,6 +802,12 @@ fi
 
 CURRENT_GENERATION_FINGERPRINT=$(compute_generation_fingerprint)
 if ! $DRY_RUN && generation_cache_hit "$CURRENT_GENERATION_FINGERPRINT"; then
+    # The cache hit itself hash-verifies every generated file against the manifest — that IS a
+    # clean check verdict, so --check reports through this fast path too.
+    if $CHECK_MODE; then
+        echo "Check: all mirrors match their templates"
+        exit 0
+    fi
     $QUIET || echo "Generated: skipped (cache hit)"
     exit 0
 fi
@@ -1012,6 +1071,7 @@ collect_generation_manifest() {
 save_generation_cache() {
     local fp_tmp manifest_tmp
     $DRY_RUN && return 0
+    $CHECK_MODE && return 0
     if ! mkdir -p "$GENERATE_CACHE_ROOT"; then
         $QUIET || echo "  WARNING: could not write generate cache dir: $GENERATE_CACHE_ROOT" >&2
         return 0
@@ -1070,13 +1130,13 @@ if [ -n "$AGENTS_STD_DIR$SKILLS_CODEX_DIR" ] && ! $DRY_RUN && [ -d "$SKILLS_DIR"
 
         LIVE_HANDWRITTEN_MIRROR_NAMES="$LIVE_HANDWRITTEN_MIRROR_NAMES $hw_name"
         if [ -n "$AGENTS_STD_DIR" ]; then
-            mkdir -p "$AGENTS_STD_DIR/$hw_name"
+            $CHECK_MODE || mkdir -p "$AGENTS_STD_DIR/$hw_name"
             copy_file_if_changed "$hw_skill_md" "$AGENTS_STD_DIR/$hw_name/SKILL.md"
             $QUIET || echo "  skill: $hw_name (+interop, hand-written)"
             interop_count=$((interop_count + 1))
         fi
         if [ -n "$SKILLS_CODEX_DIR" ]; then
-            mkdir -p "$SKILLS_CODEX_DIR/$hw_name"
+            $CHECK_MODE || mkdir -p "$SKILLS_CODEX_DIR/$hw_name"
             copy_codex_skill_md "$hw_skill_md" "$SKILLS_CODEX_DIR/$hw_name/SKILL.md"
             $QUIET || echo "  skill: $hw_name (+codex, hand-written)"
         fi
@@ -1085,6 +1145,7 @@ fi
 
 cleanup_stale() {
     local dir="$1" ext="$2" type="$3"
+    $CHECK_MODE && return 0
     for file in "$dir"/$ext; do
         [ -e "$file" ] || continue
 
@@ -1113,6 +1174,7 @@ cleanup_stale() {
 cleanup_stale_named_skill_dirs() {
     local dir="$1" live_names="$2" label="$3" skill_dir item_name skill_md
     [ -d "$dir" ] || return 0
+    $CHECK_MODE && return 0
     for skill_dir in "$dir"/*/; do
         [ -d "$skill_dir" ] || continue
         item_name=$(basename "$skill_dir")
@@ -1129,6 +1191,7 @@ cleanup_stale_named_skill_dirs() {
 cleanup_stale_named_files() {
     local dir="$1" live_names="$2" label="$3" marker="$4" file item_name
     [ -d "$dir" ] || return 0
+    $CHECK_MODE && return 0
     for file in "$dir"/*.md; do
         [ -f "$file" ] || continue
         grep -q "$marker" "$file" 2>/dev/null || continue
@@ -1155,6 +1218,16 @@ save_generation_cache
 
 # --- Summary ---
 $QUIET || echo ""
+if $CHECK_MODE; then
+    if [ ! -s "$CHECK_DRIFT_FILE" ]; then
+        # Check mode always states its verdict — with --quiet it IS the whole output
+        echo "Check: all mirrors match their templates"
+        exit 0
+    fi
+    echo "CHECK FAILED — mirrors that would change on generate:"
+    sort -u "$CHECK_DRIFT_FILE" | while read -r item; do echo "  - $item"; done
+    exit 1
+fi
 if [ -n "$AGENTS_STD_DIR" ]; then
     $QUIET || echo "Generated: $skill_count skills, $agent_count agents, $rule_count rules ($interop_count interop)"
 else
