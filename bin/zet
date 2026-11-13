@@ -197,6 +197,8 @@ cmd_validate() {
         filename=$(basename "$file")
         while IFS= read -r ref; do
             [ -n "$ref" ] || continue
+            # cross-repo/example refs are config-declared skips, not danglers
+            ref_is_ignored "$ref" && continue
             if ! resolve_script_ref "$ref" "$template_dir" >/dev/null; then
                 echo "  ERROR: $filename — dangling script reference: '$ref' (no file at repo root, template dir, or configured script roots)"
                 errors=$((errors + 1))

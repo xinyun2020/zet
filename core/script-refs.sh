@@ -14,8 +14,10 @@
 #   1. the path as written (`~` expanded, absolute kept)
 #   2. relative to ZET_ROOT (repo-rooted references like `scripts/foo.sh`)
 #   3. relative to the template directory (skill-local scripts)
-#   4. basename match under a configured script root — `[paths] scripts` in
-#      zet.toml, colon-separated for multiple roots (the shared-script area)
+#   4. RECURSIVE basename match under configured script roots — `[paths] scripts` in
+#      zet.toml, colon-separated for multiple roots (the shared-script area).
+#      Recursive (find, not a direct-child check): scripts live in subdirectories
+#      (librarian-checks.d/, cfo/, modules/) — a flat child check buries them.
 #
 # Function library (source this file):
 #   extract_script_refs <file>          — unique script refs, newline-separated
@@ -44,10 +46,19 @@ zet_config_init "$ZET_ROOT"
 # URLs are stripped first — the path fragment after https://... is not a local file.
 # Args: file_path
 # Returns: newline-separated unique refs, sorted
+# Extract unique script references (.sh/.py path tokens) from a template.
+# URLs are stripped first — the path fragment after https://... is not a local file.
+# Example-shaped fragments are dropped: they are documentation, not references —
+# suffix mentions ("every script has a .test.sh"), single-capital placeholders
+# ("X.sh"), and obvious example paths ("path/to/file.py").
 extract_script_refs() {
     local file="$1"
     sed -E 's#https?://[^[:space:])]+##g' "$file" \
-        | grep -oE '[A-Za-z0-9_./~-]+\.(sh|py)' \
+        | grep -oE '[A-Za-z0-9_./~-]+\.(sh|py)([^A-Za-z0-9]|$)' \
+        | sed -E 's/[^A-Za-z0-9]$//' \
+        | grep -vE '^\.[A-Za-z0-9]+\.(sh|py)$' \
+        | grep -vE '^[A-Z]\.(sh|py)$' \
+        | grep -vE '^path/to/' \
         | sort -u || true
 }
 
@@ -79,8 +90,9 @@ resolve_script_ref() {
         return 0
     fi
 
-    # 4. Shared script roots ([paths] scripts, colon-separated) — basename match.
-    # Re-init so a ZET_ROOT set after sourcing is honored.
+    # 4. Shared script roots ([paths] scripts, colon-separated) — RECURSIVE basename
+    #    match (first hit wins): scripts live in subdirectories of the shared areas.
+    #    Re-init so a ZET_ROOT set after sourcing is honored.
     zet_config_init "$ZET_ROOT"
     base="${ref##*/}"
     local configured
@@ -91,14 +103,34 @@ resolve_script_ref() {
             [ -n "$root" ] || continue
             # a relative root is relative to ZET_ROOT, like other [paths] entries
             [[ "$root" == /* ]] || root="$ZET_ROOT/$root"
-            candidate="$root/$base"
-            if [ -e "$candidate" ]; then
+            [ -d "$root" ] || continue
+            candidate=$(find "$root" -type f -name "$base" -not -path "*/.git/*" 2>/dev/null | head -n 1)
+            if [ -n "$candidate" ]; then
                 echo "$candidate"
                 return 0
             fi
         done
     fi
 
+    return 1
+}
+
+# Is a ref covered by the comma-separated glob ignore list in
+# zet.toml [script_refs] ignore? Cross-repo narrative mentions and
+# documentation examples are config-declared, not code-cased.
+ref_is_ignored() {
+    local ref="$1" raw pat
+    raw=$(zet_config_get "script_refs" "ignore" "")
+    [ -n "$raw" ] || return 1
+    local IFS=','
+    for pat in $raw; do
+        pat=$(echo "$pat" | tr -d ' ')
+        [ -n "$pat" ] || continue
+        # shellcheck disable=SC2254  # deliberate unquoted pattern match
+        case "$ref" in
+            $pat) return 0 ;;
+        esac
+    done
     return 1
 }
 
@@ -131,6 +163,13 @@ for file in "$TEMPLATE_DIR"/*_prompt_template.md; do
     name=$(basename "$file")
     while IFS= read -r ref; do
         [ -n "$ref" ] || continue
+        # cross-repo narrative refs (another repo's script named in prose) are
+        # documentation, not local invocations — the ignore list is comma-separated
+        # globs in zet.toml [script_refs] ignore
+        if ref_is_ignored "$ref"; then
+            printf '%s\t%s\tok\t(ignored: cross-repo/example reference)\n' "$name" "$ref" >> "$TSV"
+            continue
+        fi
         if resolved=$(resolve_script_ref "$ref" "$TEMPLATE_DIR"); then
             printf '%s\t%s\tok\t%s\n' "$name" "$ref" "$resolved" >> "$TSV"
         else
